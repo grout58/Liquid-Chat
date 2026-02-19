@@ -16,6 +16,8 @@ struct ChannelJoinView: View {
     @State private var channelKey = ""
     @State private var showAdvanced = false
     
+    private var settings: AppSettings { AppSettings.shared }
+    
     // Popular channels for quick join
     private let popularChannels = [
         "#swift", "#apple", "#macos", "#ios", "#xcode",
@@ -157,7 +159,7 @@ struct ChannelJoinView: View {
             .padding(16)
         }
         .frame(width: 500, height: 600)
-        .glassEffect(.regular, in: .rect(cornerRadius: 16))
+        .themedBackground(settings)
     }
     
     private func joinChannel() {

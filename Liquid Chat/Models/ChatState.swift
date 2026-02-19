@@ -8,6 +8,7 @@
 import Foundation
 import SwiftUI
 
+@MainActor
 @Observable
 class ChatState: IRCConnectionDelegate {
     var servers: [IRCServer] = []
@@ -147,8 +148,21 @@ class ChatState: IRCConnectionDelegate {
         let target = message.parameters[0]
         let text = message.parameters[1]
         
-        // Find or create channel
-        if let channel = server.channels.first(where: { $0.name == target }) {
+        // Determine if this is a channel message or private message
+        let isChannelMessage = target.hasPrefix("#") || target.hasPrefix("&")
+        
+        // For private messages, the "channel" is the sender's nickname
+        let channelName = isChannelMessage ? target : sender
+        
+        // Find or create channel/query
+        var channel = server.channels.first(where: { $0.name == channelName })
+        if channel == nil {
+            // Create a query channel for private messages
+            channel = IRCChannel(name: channelName, server: server)
+            server.channels.append(channel!)
+        }
+        
+        if let channel = channel {
             let chatMessage = IRCChatMessage(sender: sender, content: text, type: .message)
             channel.messages.append(chatMessage)
         }

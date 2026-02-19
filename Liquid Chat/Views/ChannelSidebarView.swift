@@ -12,8 +12,10 @@ struct ChannelSidebarView: View {
     @Binding var selectedChannel: IRCChannel?
     @State private var showingConnectionSheet = false
     
+    private var settings: AppSettings { AppSettings.shared }
+    
     var body: some View {
-        GlassEffectContainer(spacing: 8.0) {
+        VStack(spacing: 0) {
             Group {
                 if chatState.servers.isEmpty {
                     ContentUnavailableView {
@@ -26,7 +28,7 @@ struct ChannelSidebarView: View {
                         } label: {
                             Text("Add Server")
                         }
-                        .buttonStyle(.glassProminent)
+                        .buttonStyle(.borderedProminent)
                     }
                 } else {
                     List(selection: $selectedChannel) {
@@ -52,7 +54,7 @@ struct ChannelSidebarView: View {
                     } label: {
                         Label("Add Server", systemImage: "plus")
                     }
-                    .buttonStyle(.glass)
+                    .buttonStyle(.bordered)
                 }
             }
             .sheet(isPresented: $showingConnectionSheet) {
@@ -64,6 +66,7 @@ struct ChannelSidebarView: View {
                 }
             }
         }
+        .themedBackground(settings)
     }
 }
 

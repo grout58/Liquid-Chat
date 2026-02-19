@@ -27,5 +27,9 @@ struct Liquid_ChatApp: App {
                 .keyboardShortcut("n", modifiers: [.command])
             }
         }
+        
+        Settings {
+            SettingsView()
+        }
     }
 }

@@ -13,6 +13,9 @@ struct MainWindow: View {
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
     @State private var showConsole = false
     
+    // Use shared settings directly without @State copy
+    private var settings: AppSettings { AppSettings.shared }
+    
     init() {
         ConsoleLogger.shared.log("Main window initialized", level: .debug, category: "App")
     }
@@ -57,8 +60,10 @@ struct MainWindow: View {
             }
         }
         .environment(chatState)
+        .themedStyle(settings)
         .sheet(item: $chatState.showingChannelJoinForServer) { server in
             ChannelJoinView(server: server, chatState: chatState)
+                .themedStyle(settings)
         }
     }
 }

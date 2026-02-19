@@ -149,11 +149,15 @@ class IRCConnection {
             case .failed(let error):
                 log("Connection failed: \(error.localizedDescription)", level: .error)
                 self.state = .error(error.localizedDescription)
-                self.delegate?.connectionDidFail(self, error: error)
+                Task { @MainActor in
+                    self.delegate?.connectionDidFail(self, error: error)
+                }
             case .cancelled:
                 log("Connection cancelled", level: .info)
                 self.state = .disconnected
-                self.delegate?.connectionDidDisconnect(self)
+                Task { @MainActor in
+                    self.delegate?.connectionDidDisconnect(self)
+                }
             case .waiting(let error):
                 log("Connection waiting: \(error.localizedDescription)", level: .warning)
             case .preparing:
@@ -170,7 +174,9 @@ class IRCConnection {
     private func handleConnectionReady() {
         log("Connection ready to \(config.hostname):\(config.port)", level: .info)
         state = .connected
-        delegate?.connectionDidConnect(self)
+        Task { @MainActor in
+            self.delegate?.connectionDidConnect(self)
+        }
         performIRCHandshake()
     }
     
@@ -238,7 +244,11 @@ class IRCConnection {
         connection?.send(content: data, completion: .contentProcessed { [weak self] error in
             if let error = error {
                 log("Send error: \(error)", level: .error)
-                self?.delegate?.connection(self!, didEncounterError: error)
+                if let self = self {
+                    Task { @MainActor in
+                        self.delegate?.connection(self, didEncounterError: error)
+                    }
+                }
             }
         })
     }
@@ -254,7 +264,9 @@ class IRCConnection {
             }
             
             if let error = error {
-                self.delegate?.connection(self, didEncounterError: error)
+                Task { @MainActor in
+                    self.delegate?.connection(self, didEncounterError: error)
+                }
                 return
             }
             
@@ -305,7 +317,9 @@ class IRCConnection {
             log("✓ Registered successfully", level: .info)
             state = .registered
             serverName = parsed.prefix
-            delegate?.connectionDidRegister(self)
+            Task { @MainActor in
+                self.delegate?.connectionDidRegister(self)
+            }
             
         case "433": // ERR_NICKNAMEINUSE
             log("Nickname in use, trying alternate", level: .warning)
@@ -316,7 +330,9 @@ class IRCConnection {
         }
         
         // Forward to delegate
-        delegate?.connection(self, didReceiveMessage: parsed)
+        Task { @MainActor in
+            self.delegate?.connection(self, didReceiveMessage: parsed)
+        }
     }
     
     private func handleCapabilityResponse(_ message: IRCMessage) {

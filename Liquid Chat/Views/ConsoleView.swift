@@ -15,7 +15,7 @@ struct ConsoleLogEntry: Identifiable {
     let category: String
     let message: String
     
-    enum LogLevel {
+    enum LogLevel: String, CaseIterable {
         case debug
         case info
         case warning

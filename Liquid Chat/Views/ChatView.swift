@@ -15,31 +15,30 @@ struct ChatView: View {
     @State private var showUserList = true
     @State private var messageHistory: [String] = []
     @State private var historyIndex = -1
-    @Namespace private var glassNamespace
+    
+    private var settings: AppSettings { AppSettings.shared }
     
     private var commandHandler: IRCCommandHandler {
         IRCCommandHandler(connection: channel.server.connection, chatState: chatState)
     }
     
     var body: some View {
-        GlassEffectContainer(spacing: 12.0) {
+        VStack(spacing: 0) {
             HStack(spacing: 0) {
                 // Main message area
                 VStack(spacing: 0) {
-                    // Channel header with Liquid Glass
+                    // Channel header
                     ChannelHeaderView(channel: channel)
-                        .glassEffect(.regular.tint(.blue.opacity(0.3)), in: .rect(cornerRadius: 12))
-                        .glassEffectID("header", in: glassNamespace)
+                        .themedCard(cornerRadius: 12, settings: settings)
                         .padding(.horizontal, 12)
                         .padding(.top, 12)
                     
-                    // Message list with Liquid Glass background
+                    // Message list
                     MessageListView(channel: channel)
-                        .glassEffect(.regular, in: .rect(cornerRadius: 12))
-                        .glassEffectID("messages", in: glassNamespace)
+                        .themedCard(cornerRadius: 12, settings: settings)
                         .padding(12)
                     
-                    // Message input with Liquid Glass
+                    // Message input
                     MessageInputView(
                         messageText: $messageText,
                         messageHistory: messageHistory,
@@ -48,8 +47,7 @@ struct ChatView: View {
                             sendMessage()
                         }
                     )
-                    .glassEffect(.regular.interactive(), in: .capsule)
-                    .glassEffectID("input", in: glassNamespace)
+                    .themedCard(cornerRadius: 20, settings: settings)
                     .padding(12)
                 }
                 
@@ -57,14 +55,14 @@ struct ChatView: View {
                 if showUserList {
                     UserListView(channel: channel)
                         .frame(width: 200)
-                        .glassEffect(.regular, in: .rect(cornerRadius: 12))
-                        .glassEffectID("userlist", in: glassNamespace)
+                        .themedCard(cornerRadius: 12, settings: settings)
                         .padding(.trailing, 12)
                         .padding(.vertical, 12)
                         .transition(.move(edge: .trailing).combined(with: .opacity))
                 }
             }
         }
+        .themedBackground(settings)
         .navigationTitle(channel.name)
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
