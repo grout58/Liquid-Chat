@@ -1,0 +1,3 @@
+[submodule "External/HexChat"]
+	path = External/HexChat
+	url = https://github.com/hexchat/hexchat
