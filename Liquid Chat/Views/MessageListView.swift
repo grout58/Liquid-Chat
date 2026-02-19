@@ -97,12 +97,12 @@ struct MessageRowView: View {
             
             // Message content
             VStack(alignment: .leading, spacing: 4) {
-                // Sender name
+                // Sender name with color
                 if message.type == .message || message.type == .action {
                     Text(message.sender)
                         .font(.caption)
                         .fontWeight(.semibold)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(NicknameColorizer.color(for: message.sender))
                 }
                 
                 // Message text with rich formatting
@@ -128,8 +128,32 @@ struct MessageRowView: View {
 struct HighPerformanceTextView: View {
     let content: AttributedString
     
+    var processedContent: AttributedString {
+        var attributed = content
+        
+        // Detect and linkify URLs
+        let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue)
+        let text = String(attributed.characters)
+        let matches = detector?.matches(in: text, range: NSRange(text.startIndex..., in: text))
+        
+        for match in matches ?? [] {
+            if let range = Range(match.range, in: text) {
+                let attributedRange = attributed.range(of: String(text[range]))
+                if let attributedRange = attributedRange {
+                    attributed[attributedRange].foregroundColor = .blue
+                    attributed[attributedRange].underlineStyle = .single
+                    if let url = match.url {
+                        attributed[attributedRange].link = url
+                    }
+                }
+            }
+        }
+        
+        return attributed
+    }
+    
     var body: some View {
-        Text(content)
+        Text(processedContent)
             .font(.body)
             .textSelection(.enabled)
     }
@@ -146,11 +170,6 @@ struct NSTextLayoutView: NSViewRepresentable {
         textView.drawsBackground = false
         textView.textContainerInset = .zero
         textView.textContainer?.lineFragmentPadding = 0
-        
-        // Use modern TextKit 2 for best performance
-        if #available(macOS 12.0, *) {
-            textView.textLayoutManager?.textContentManager?.automaticallySynchronizesTextContentToBackingStore = true
-        }
         
         return textView
     }

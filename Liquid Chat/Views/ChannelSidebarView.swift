@@ -10,31 +10,57 @@ import SwiftUI
 struct ChannelSidebarView: View {
     let chatState: ChatState
     @Binding var selectedChannel: IRCChannel?
+    @State private var showingConnectionSheet = false
     
     var body: some View {
         GlassEffectContainer(spacing: 8.0) {
-            List(selection: $selectedChannel) {
-                ForEach(chatState.servers) { server in
-                    Section {
-                        ForEach(server.channels) { channel in
-                            ChannelRowView(channel: channel)
-                                .tag(channel)
+            Group {
+                if chatState.servers.isEmpty {
+                    ContentUnavailableView {
+                        Label("No Servers", systemImage: "network.slash")
+                    } description: {
+                        Text("Connect to an IRC server to get started")
+                    } actions: {
+                        Button {
+                            showingConnectionSheet = true
+                        } label: {
+                            Text("Add Server")
                         }
-                    } header: {
-                        ServerHeaderView(server: server, chatState: chatState)
+                        .buttonStyle(.glassProminent)
                     }
+                } else {
+                    List(selection: $selectedChannel) {
+                        ForEach(chatState.servers) { server in
+                            Section {
+                                ForEach(server.channels) { channel in
+                                    ChannelRowView(channel: channel)
+                                        .tag(channel)
+                                }
+                            } header: {
+                                ServerHeaderView(server: server, chatState: chatState)
+                            }
+                        }
+                    }
+                    .listStyle(.sidebar)
                 }
             }
-            .listStyle(.sidebar)
             .navigationTitle("Channels")
             .toolbar {
                 ToolbarItem(placement: .primaryAction) {
                     Button {
-                        // Add server action
+                        showingConnectionSheet = true
                     } label: {
                         Label("Add Server", systemImage: "plus")
                     }
                     .buttonStyle(.glass)
+                }
+            }
+            .sheet(isPresented: $showingConnectionSheet) {
+                ServerConnectionView { config in
+                    chatState.addServer(config: config)
+                    if let server = chatState.servers.last {
+                        chatState.connectToServer(server)
+                    }
                 }
             }
         }
@@ -45,6 +71,8 @@ struct ServerHeaderView: View {
     let server: IRCServer
     let chatState: ChatState
     @State private var isExpanded = true
+    @State private var showingJoinChannel = false
+    @State private var channelName = ""
     
     var body: some View {
         HStack {
@@ -56,7 +84,16 @@ struct ServerHeaderView: View {
             
             Spacer()
             
-            if !server.isConnected {
+            if server.isConnected {
+                Button {
+                    showingJoinChannel = true
+                } label: {
+                    Image(systemName: "plus.circle")
+                        .font(.caption)
+                }
+                .buttonStyle(.plain)
+                .help("Join Channel")
+            } else {
                 Button {
                     chatState.connectToServer(server)
                 } label: {
@@ -67,6 +104,20 @@ struct ServerHeaderView: View {
             }
         }
         .padding(.vertical, 4)
+        .alert("Join Channel", isPresented: $showingJoinChannel) {
+            TextField("Channel name (e.g., #swift)", text: $channelName)
+            Button("Cancel", role: .cancel) {
+                channelName = ""
+            }
+            Button("Join") {
+                let channel = channelName.hasPrefix("#") ? channelName : "#\(channelName)"
+                chatState.joinChannel(name: channel, on: server)
+                channelName = ""
+            }
+            .disabled(channelName.isEmpty)
+        } message: {
+            Text("Enter the name of the channel you want to join")
+        }
     }
 }
 

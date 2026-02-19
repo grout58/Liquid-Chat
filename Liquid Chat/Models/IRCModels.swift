@@ -87,7 +87,6 @@ struct IRCChatMessage: Identifiable {
     }
     
     init(sender: String, content: String, type: MessageType = .message) {
-        self.id = UUID()
         self.timestamp = Date()
         self.sender = sender
         self.content = AttributedString(content)
@@ -95,7 +94,6 @@ struct IRCChatMessage: Identifiable {
     }
     
     init(sender: String, content: AttributedString, type: MessageType = .message) {
-        self.id = UUID()
         self.timestamp = Date()
         self.sender = sender
         self.content = content

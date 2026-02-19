@@ -13,7 +13,13 @@ struct ChatView: View {
     
     @State private var messageText = ""
     @State private var showUserList = true
+    @State private var messageHistory: [String] = []
+    @State private var historyIndex = -1
     @Namespace private var glassNamespace
+    
+    private var commandHandler: IRCCommandHandler {
+        IRCCommandHandler(connection: channel.server.connection, chatState: chatState)
+    }
     
     var body: some View {
         GlassEffectContainer(spacing: 12.0) {
@@ -36,6 +42,8 @@ struct ChatView: View {
                     // Message input with Liquid Glass
                     MessageInputView(
                         messageText: $messageText,
+                        messageHistory: messageHistory,
+                        historyIndex: $historyIndex,
                         onSend: {
                             sendMessage()
                         }
@@ -78,7 +86,21 @@ struct ChatView: View {
     private func sendMessage() {
         guard !messageText.trimmingCharacters(in: .whitespaces).isEmpty else { return }
         
-        chatState.sendMessage(messageText, to: channel)
+        // Add to history
+        messageHistory.append(messageText)
+        if messageHistory.count > 50 {
+            messageHistory.removeFirst()
+        }
+        historyIndex = -1
+        
+        // Check if it's a command
+        let isCommand = commandHandler.handleInput(messageText, in: channel)
+        
+        // If not a command, send as regular message
+        if !isCommand {
+            chatState.sendMessage(messageText, to: channel)
+        }
+        
         messageText = ""
     }
 }
@@ -116,18 +138,28 @@ struct ChannelHeaderView: View {
 
 struct MessageInputView: View {
     @Binding var messageText: String
+    let messageHistory: [String]
+    @Binding var historyIndex: Int
     let onSend: () -> Void
     
     @FocusState private var isFocused: Bool
     
     var body: some View {
         HStack(spacing: 12) {
-            TextField("Message", text: $messageText, axis: .vertical)
+            TextField("Message or /command", text: $messageText, axis: .vertical)
                 .textFieldStyle(.plain)
                 .lineLimit(1...5)
                 .focused($isFocused)
                 .onSubmit {
                     onSend()
+                }
+                .onKeyPress(.upArrow) {
+                    navigateHistory(direction: .up)
+                    return .handled
+                }
+                .onKeyPress(.downArrow) {
+                    navigateHistory(direction: .down)
+                    return .handled
                 }
             
             Button {
@@ -141,6 +173,33 @@ struct MessageInputView: View {
             .disabled(messageText.trimmingCharacters(in: .whitespaces).isEmpty)
         }
         .padding(12)
+        .onAppear {
+            isFocused = true
+        }
+    }
+    
+    private func navigateHistory(direction: HistoryDirection) {
+        guard !messageHistory.isEmpty else { return }
+        
+        switch direction {
+        case .up:
+            if historyIndex < messageHistory.count - 1 {
+                historyIndex += 1
+                messageText = messageHistory[messageHistory.count - 1 - historyIndex]
+            }
+        case .down:
+            if historyIndex > 0 {
+                historyIndex -= 1
+                messageText = messageHistory[messageHistory.count - 1 - historyIndex]
+            } else if historyIndex == 0 {
+                historyIndex = -1
+                messageText = ""
+            }
+        }
+    }
+    
+    enum HistoryDirection {
+        case up, down
     }
 }
 

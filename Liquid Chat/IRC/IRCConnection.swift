@@ -8,6 +8,11 @@
 import Foundation
 import Network
 
+// Convenience logging
+private func log(_ message: String, level: ConsoleLogEntry.LogLevel = .info) {
+    ConsoleLogger.shared.log(message, level: level, category: "IRC")
+}
+
 /// Represents the connection state of an IRC server
 enum IRCConnectionState: Equatable {
     case disconnected
@@ -91,9 +96,14 @@ class IRCConnection {
     
     /// Connect to the IRC server
     func connect() {
-        guard state == .disconnected else { return }
+        ConsoleLogger.shared.log("connect() called, current state: \(state)", level: .debug, category: "IRC")
+        guard state == .disconnected else {
+            ConsoleLogger.shared.log("Already connecting/connected, ignoring", level: .debug, category: "IRC")
+            return
+        }
         
         state = .connecting
+        ConsoleLogger.shared.log("Connecting to \(config.hostname):\(config.port) (SSL: \(config.useSSL))", level: .info, category: "IRC")
         
         // Configure NWConnection parameters
         let parameters: NWParameters
@@ -103,15 +113,17 @@ class IRCConnection {
             parameters = .tcp
         }
         
-        // Create connection
+        // Create connection directly - sandbox is now configured properly
         let endpoint = NWEndpoint.hostPort(
             host: NWEndpoint.Host(config.hostname),
             port: NWEndpoint.Port(rawValue: config.port)!
         )
         
+        log("Creating connection to \(endpoint)")
         connection = NWConnection(to: endpoint, using: parameters)
         setupConnectionHandlers()
         
+        log("Starting connection on queue")
         connection?.start(queue: receiveQueue)
     }
     
@@ -129,15 +141,23 @@ class IRCConnection {
         connection?.stateUpdateHandler = { [weak self] newState in
             guard let self = self else { return }
             
+            log("Connection state changed: \(newState)", level: .debug)
+            
             switch newState {
             case .ready:
                 self.handleConnectionReady()
             case .failed(let error):
+                log("Connection failed: \(error.localizedDescription)", level: .error)
                 self.state = .error(error.localizedDescription)
                 self.delegate?.connectionDidFail(self, error: error)
             case .cancelled:
+                log("Connection cancelled", level: .info)
                 self.state = .disconnected
                 self.delegate?.connectionDidDisconnect(self)
+            case .waiting(let error):
+                log("Connection waiting: \(error.localizedDescription)", level: .warning)
+            case .preparing:
+                log("Connection preparing...", level: .debug)
             default:
                 break
             }
@@ -148,6 +168,7 @@ class IRCConnection {
     
     /// Handle successful TCP connection - begin IRC handshake
     private func handleConnectionReady() {
+        log("Connection ready to \(config.hostname):\(config.port)", level: .info)
         state = .connected
         delegate?.connectionDidConnect(self)
         performIRCHandshake()
@@ -157,6 +178,11 @@ class IRCConnection {
     
     /// Perform the IRC connection handshake (based on HexChat's proto-irc.c:irc_login)
     private func performIRCHandshake() {
+        guard state == .connected else {
+            log("Skipping handshake - already in state: \(state)", level: .debug)
+            return
+        }
+        log("Beginning handshake", level: .info)
         state = .authenticating
         
         // Step 1: Request capabilities (CAP LS 302)
@@ -168,16 +194,19 @@ class IRCConnection {
             let formattedPassword = (password.hasPrefix(":") || password.contains(" ")) 
                 ? ":\(password)" 
                 : password
+            log("Sending PASS (hidden)", level: .debug)
             send(command: "PASS", parameters: [formattedPassword])
         }
         
         // Step 3: Send NICK and USER commands
-        send(command: "NICK", parameters: [config.nickname])
+        // Sanitize nickname - remove spaces and invalid characters
+        let sanitizedNickname = config.nickname.replacingOccurrences(of: " ", with: "_")
+        send(command: "NICK", parameters: [sanitizedNickname])
         send(command: "USER", parameters: [
             config.username,
             "0",
             "*",
-            ":\(config.realname)"
+            config.realname  // Don't add : here, send() will handle it
         ])
     }
     
@@ -204,10 +233,11 @@ class IRCConnection {
     /// Send raw IRC message
     func send(raw message: String) {
         let data = "\(message)\r\n".data(using: .utf8)!
+        log("→ \(message)", level: .debug)
         
         connection?.send(content: data, completion: .contentProcessed { [weak self] error in
             if let error = error {
-                print("Send error: \(error)")
+                log("Send error: \(error)", level: .error)
                 self?.delegate?.connection(self!, didEncounterError: error)
             }
         })
@@ -253,7 +283,12 @@ class IRCConnection {
     // MARK: - IRC Message Parsing
     
     private func handleIRCMessage(_ message: String) {
-        guard let parsed = IRCMessage.parse(message) else { return }
+        log("← \(message)", level: .debug)
+        
+        guard let parsed = IRCMessage.parse(message) else {
+            log("Failed to parse message: \(message)", level: .warning)
+            return
+        }
         
         // Handle server-specific messages
         switch parsed.command {
@@ -267,11 +302,13 @@ class IRCConnection {
             handleCapabilityResponse(parsed)
             
         case "001": // RPL_WELCOME
+            log("✓ Registered successfully", level: .info)
             state = .registered
             serverName = parsed.prefix
             delegate?.connectionDidRegister(self)
             
         case "433": // ERR_NICKNAMEINUSE
+            log("Nickname in use, trying alternate", level: .warning)
             handleNicknameInUse()
             
         default:

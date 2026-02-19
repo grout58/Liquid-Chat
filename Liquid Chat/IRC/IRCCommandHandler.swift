@@ -50,7 +50,8 @@ class IRCCommandHandler {
             
         case "part", "leave":
             let reason = args.isEmpty ? "Leaving" : args
-            chatState?.partChannel(channel, reason: reason)
+            connection.part(channel: channel.name, message: reason)
+            chatState?.partChannel(channel)
             
         case "topic":
             if args.isEmpty {

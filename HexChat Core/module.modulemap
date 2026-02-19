@@ -1,0 +1,4 @@
+module HexChatCore {
+    header "hexchat.h" // Point to the main header
+    export *
+}

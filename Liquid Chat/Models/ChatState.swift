@@ -12,6 +12,7 @@ import SwiftUI
 class ChatState: IRCConnectionDelegate {
     var servers: [IRCServer] = []
     var selectedChannel: IRCChannel?
+    var showingChannelJoinForServer: IRCServer?
     
     init() {
         // Initialize with empty state
@@ -73,20 +74,25 @@ class ChatState: IRCConnectionDelegate {
     // MARK: - IRCConnectionDelegate
     
     func connectionDidConnect(_ connection: IRCConnection) {
-        print("Connected to \(connection.config.hostname)")
+        ConsoleLogger.shared.log("Connected to \(connection.config.hostname)", level: .info, category: "Connection")
     }
     
     func connectionDidRegister(_ connection: IRCConnection) {
-        print("Registered on \(connection.config.hostname)")
+        ConsoleLogger.shared.log("Registered on \(connection.config.hostname)", level: .info, category: "Connection")
         
         // Mark server as connected
         if let server = servers.first(where: { $0.connection === connection }) {
             server.isConnected = true
+            
+            // Show channel join dialog
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                self.showingChannelJoinForServer = server
+            }
         }
     }
     
     func connectionDidDisconnect(_ connection: IRCConnection) {
-        print("Disconnected from \(connection.config.hostname)")
+        ConsoleLogger.shared.log("Disconnected from \(connection.config.hostname)", level: .warning, category: "Connection")
         
         if let server = servers.first(where: { $0.connection === connection }) {
             server.isConnected = false
@@ -94,7 +100,7 @@ class ChatState: IRCConnectionDelegate {
     }
     
     func connectionDidFail(_ connection: IRCConnection, error: Error) {
-        print("Connection failed: \(error.localizedDescription)")
+        ConsoleLogger.shared.log("Connection failed: \(error.localizedDescription)", level: .error, category: "Connection")
     }
     
     func connection(_ connection: IRCConnection, didReceiveMessage message: IRCMessage) {
@@ -102,7 +108,7 @@ class ChatState: IRCConnectionDelegate {
     }
     
     func connection(_ connection: IRCConnection, didEncounterError error: Error) {
-        print("Connection error: \(error.localizedDescription)")
+        ConsoleLogger.shared.log("Connection error: \(error.localizedDescription)", level: .error, category: "Connection")
     }
     
     // MARK: - Message Handling
@@ -168,7 +174,7 @@ class ChatState: IRCConnectionDelegate {
             channel.messages.append(joinMessage)
             
             // If it's us, mark channel as joined
-            if nick == connection.currentNickname {
+            if let connection = server.connection, nick == connection.currentNickname {
                 channel.isJoined = true
             }
         }
