@@ -9,7 +9,7 @@ import SwiftUI
 
 struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
-    @State private var settings = AppSettings.shared
+    @Bindable var settings = AppSettings.shared
     @State private var selectedTab: SettingsTab = .appearance
     
     enum SettingsTab: String, CaseIterable {
@@ -270,13 +270,35 @@ struct AdvancedSettingsView: View {
 struct ThemePickerView: View {
     @Binding var selectedTheme: AppTheme
     
+    private var groupedThemes: [String: [AppTheme]] {
+        Dictionary(grouping: AppTheme.allCases, by: { $0.category })
+    }
+    
+    private var sortedCategories: [String] {
+        ["Standard", "Solarized", "Gruvbox", "Nord", "Tokyo Night", "Dracula", "Fun Themes"]
+    }
+    
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            ForEach(AppTheme.allCases) { theme in
-                ThemeOptionRow(theme: theme, isSelected: selectedTheme == theme)
-                    .onTapGesture {
-                        selectedTheme = theme
+        VStack(alignment: .leading, spacing: 20) {
+            ForEach(sortedCategories, id: \.self) { category in
+                if let themes = groupedThemes[category], !themes.isEmpty {
+                    VStack(alignment: .leading, spacing: 12) {
+                        if category != "Standard" {
+                            Text(category)
+                                .font(.subheadline)
+                                .fontWeight(.semibold)
+                                .foregroundStyle(.secondary)
+                                .padding(.horizontal, 4)
+                        }
+                        
+                        ForEach(themes) { theme in
+                            ThemeOptionRow(theme: theme, isSelected: selectedTheme == theme)
+                                .onTapGesture {
+                                    selectedTheme = theme
+                                }
+                        }
                     }
+                }
             }
         }
     }
@@ -288,34 +310,60 @@ struct ThemeOptionRow: View {
     
     var body: some View {
         HStack(spacing: 16) {
+            // Theme icon
             Image(systemName: theme.previewIcon)
                 .font(.title2)
-                .foregroundStyle(.blue)
+                .foregroundStyle(theme.colors.accent)
                 .frame(width: 40)
             
-            VStack(alignment: .leading, spacing: 4) {
+            // Theme info
+            VStack(alignment: .leading, spacing: 6) {
                 Text(theme.displayName)
                     .font(.headline)
                 Text(theme.description)
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                
+                // Color palette preview
+                HStack(spacing: 4) {
+                    ColorSwatch(color: theme.colors.background)
+                    ColorSwatch(color: theme.colors.secondaryBackground)
+                    ColorSwatch(color: theme.colors.accent)
+                    ColorSwatch(color: theme.colors.success)
+                    ColorSwatch(color: theme.colors.warning)
+                    ColorSwatch(color: theme.colors.error)
+                }
             }
             
             Spacer()
             
             if isSelected {
                 Image(systemName: "checkmark.circle.fill")
-                    .foregroundStyle(.blue)
+                    .foregroundStyle(theme.colors.accent)
                     .font(.title3)
             }
         }
         .padding(12)
-        .background(isSelected ? Color.accentColor.opacity(0.1) : Color.clear)
+        .background(isSelected ? theme.colors.accent.opacity(0.1) : Color.clear)
         .clipShape(RoundedRectangle(cornerRadius: 8))
         .overlay {
             RoundedRectangle(cornerRadius: 8)
-                .stroke(isSelected ? Color.accentColor : Color.clear, lineWidth: 2)
+                .stroke(isSelected ? theme.colors.accent : Color.clear, lineWidth: 2)
         }
+    }
+}
+
+struct ColorSwatch: View {
+    let color: Color
+    
+    var body: some View {
+        RoundedRectangle(cornerRadius: 3)
+            .fill(color)
+            .frame(width: 20, height: 20)
+            .overlay {
+                RoundedRectangle(cornerRadius: 3)
+                    .stroke(Color.primary.opacity(0.2), lineWidth: 0.5)
+            }
     }
 }
 
@@ -325,6 +373,7 @@ struct SettingsSection<Content: View>: View {
     let title: String
     let icon: String
     @ViewBuilder let content: Content
+    @Environment(\.themeColors) private var themeColors
     
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -333,15 +382,14 @@ struct SettingsSection<Content: View>: View {
                     .font(.headline)
             } icon: {
                 Image(systemName: icon)
-                    .foregroundStyle(.blue)
+                    .foregroundStyle(themeColors.accent)
             }
             
             VStack(alignment: .leading, spacing: 8) {
                 content
             }
             .padding(16)
-            .background(Color.secondary.opacity(0.1))
-            .clipShape(RoundedRectangle(cornerRadius: 12))
+            .background(themeColors.secondaryBackground, in: RoundedRectangle(cornerRadius: 12))
         }
     }
 }

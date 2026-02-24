@@ -47,10 +47,15 @@ class ConsoleLogger {
     static let shared = ConsoleLogger()
     
     var entries: [ConsoleLogEntry] = []
-    var maxEntries = 1000
+    private let maxEntries = Logging.maxConsoleEntries
     
     private init() {}
     
+    /// Logs a message to the console with the specified level and category
+    /// - Parameters:
+    ///   - message: The message to log
+    ///   - level: The log level (debug, info, warning, error)
+    ///   - category: The category for grouping related messages
     func log(_ message: String, level: ConsoleLogEntry.LogLevel = .info, category: String = "General") {
         let entry = ConsoleLogEntry(
             timestamp: Date(),
@@ -61,12 +66,12 @@ class ConsoleLogger {
         
         entries.append(entry)
         
-        // Keep only recent entries
-        if entries.count > maxEntries {
-            entries.removeFirst(entries.count - maxEntries)
+        // Enforce maximum entries limit to prevent memory growth
+        while entries.count > maxEntries {
+            entries.removeFirst()
         }
         
-        // Still print to Xcode console for development
+        // Print to Xcode console for development
         #if DEBUG
         print("[\(category)] \(message)")
         #endif

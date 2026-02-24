@@ -29,6 +29,9 @@ struct ChatSummary {
     
     /// Overall sentiment (positive, neutral, negative)
     let sentiment: String
+    
+    /// Total number of messages summarized
+    let messageCount: Int
 }
 #else
 struct ChatSummary: Codable {
@@ -36,6 +39,7 @@ struct ChatSummary: Codable {
     let participantCount: Int
     let topics: [String]
     let sentiment: String
+    let messageCount: Int
 }
 #endif
 
@@ -200,12 +204,9 @@ class CatchUpSummarizer {
     }
 }
 
-#if canImport(FoundationModels)
-import struct FoundationModels.GenerationOptions
-#else
+#if !canImport(FoundationModels)
 /// Placeholder for when FoundationModels is unavailable
 struct GenerationOptions {
-    let temperature: Double
-    let maxTokens: Int
+    var temperature: Double = 0.3
 }
 #endif

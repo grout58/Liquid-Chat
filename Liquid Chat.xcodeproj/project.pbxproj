@@ -7,6 +7,10 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		ED198DE32F491B5500560FA9 /* CLAUDE.md in Resources */ = {isa = PBXBuildFile; fileRef = ED198DE22F491B5500560FA9 /* CLAUDE.md */; };
+		ED198DE92F491D3F00560FA9 /* IMPLEMENTATION_SUMMARY.md in Resources */ = {isa = PBXBuildFile; fileRef = ED198DE82F491D3F00560FA9 /* IMPLEMENTATION_SUMMARY.md */; };
+		ED198DEB2F491E2800560FA9 /* BUGFIX_CONNECTION_TIMEOUT.md in Resources */ = {isa = PBXBuildFile; fileRef = ED198DEA2F491E2800560FA9 /* BUGFIX_CONNECTION_TIMEOUT.md */; };
+		ED198DEF2F49212D00560FA9 /* REFACTORING_REPORT.md in Resources */ = {isa = PBXBuildFile; fileRef = ED198DEE2F49212D00560FA9 /* REFACTORING_REPORT.md */; };
 		ED6D44502F4764C100BA4733 /* README.md in Resources */ = {isa = PBXBuildFile; fileRef = ED6D444F2F4764C100BA4733 /* README.md */; };
 /* End PBXBuildFile section */
 
@@ -28,6 +32,10 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		ED198DE22F491B5500560FA9 /* CLAUDE.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = CLAUDE.md; sourceTree = "<group>"; };
+		ED198DE82F491D3F00560FA9 /* IMPLEMENTATION_SUMMARY.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = IMPLEMENTATION_SUMMARY.md; sourceTree = "<group>"; };
+		ED198DEA2F491E2800560FA9 /* BUGFIX_CONNECTION_TIMEOUT.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = BUGFIX_CONNECTION_TIMEOUT.md; sourceTree = "<group>"; };
+		ED198DEE2F49212D00560FA9 /* REFACTORING_REPORT.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = REFACTORING_REPORT.md; sourceTree = "<group>"; };
 		ED6D43992F47608700BA4733 /* Liquid Chat.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Liquid Chat.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		ED6D43A62F47608800BA4733 /* Liquid ChatTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "Liquid ChatTests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
 		ED6D43B02F47608800BA4733 /* Liquid ChatUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "Liquid ChatUITests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -85,6 +93,10 @@
 				ED6D43B32F47608800BA4733 /* Liquid ChatUITests */,
 				ED6D439A2F47608700BA4733 /* Products */,
 				ED6D444F2F4764C100BA4733 /* README.md */,
+				ED198DE22F491B5500560FA9 /* CLAUDE.md */,
+				ED198DE82F491D3F00560FA9 /* IMPLEMENTATION_SUMMARY.md */,
+				ED198DEA2F491E2800560FA9 /* BUGFIX_CONNECTION_TIMEOUT.md */,
+				ED198DEE2F49212D00560FA9 /* REFACTORING_REPORT.md */,
 			);
 			sourceTree = "<group>";
 		};
@@ -219,6 +231,10 @@
 			buildActionMask = 2147483647;
 			files = (
 				ED6D44502F4764C100BA4733 /* README.md in Resources */,
+				ED198DEF2F49212D00560FA9 /* REFACTORING_REPORT.md in Resources */,
+				ED198DE92F491D3F00560FA9 /* IMPLEMENTATION_SUMMARY.md in Resources */,
+				ED198DE32F491B5500560FA9 /* CLAUDE.md in Resources */,
+				ED198DEB2F491E2800560FA9 /* BUGFIX_CONNECTION_TIMEOUT.md in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

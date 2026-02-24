@@ -2,7 +2,7 @@
 //  MessageListView.swift
 //  Liquid Chat
 //
-//  High-performance message rendering using TextLayout API
+//  Modern UX with message grouping, collapsed status events, and visual hierarchy
 //
 
 import SwiftUI
@@ -10,116 +10,445 @@ import AppKit
 
 struct MessageListView: View {
     let channel: IRCChannel
+    @Binding var scrollToMessageIndex: Int?
+    @Binding var highlightedMessageIndex: Int?
     
     @State private var scrollPosition: UUID?
+    @State private var expandedStatusGroups: Set<UUID> = []
+    
+    // Group messages for better UX
+    private var groupedMessages: [MessageGroup] {
+        groupMessages(channel.messages)
+    }
+    
+    // Find group containing a specific message index
+    private func findGroup(forMessageIndex index: Int) -> UUID? {
+        for group in groupedMessages {
+            switch group {
+            case .regular(_, _):
+                if let groupIndex = channel.messages.firstIndex(where: { msg in
+                    if case .regular(let message, _) = group {
+                        return msg.id == message.id
+                    }
+                    return false
+                }), groupIndex == index {
+                    return group.id
+                }
+            case .statusGroup(let messages):
+                if let foundMessage = messages.first(where: { msg in
+                    if let msgIndex = channel.messages.firstIndex(where: { $0.id == msg.id }) {
+                        return msgIndex == index
+                    }
+                    return false
+                }) {
+                    return group.id
+                }
+            }
+        }
+        return nil
+    }
     
     var body: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 8) {
-                    ForEach(channel.messages) { message in
-                        MessageRowView(message: message)
-                            .id(message.id)
+                LazyVStack(alignment: .leading, spacing: 2) {
+                    ForEach(Array(groupedMessages.enumerated()), id: \.element.id) { index, group in
+                        MessageGroupView(
+                            group: group,
+                            channel: channel,
+                            messageIndex: getMessageIndex(for: group),
+                            isHighlighted: isGroupHighlighted(group),
+                            isExpanded: expandedStatusGroups.contains(group.id),
+                            onToggleExpand: {
+                                if expandedStatusGroups.contains(group.id) {
+                                    expandedStatusGroups.remove(group.id)
+                                } else {
+                                    expandedStatusGroups.insert(group.id)
+                                }
+                            }
+                        )
+                        .id(group.id)
                     }
                 }
                 .padding(12)
             }
             .onChange(of: channel.messages.count) { _, _ in
                 // Auto-scroll to bottom on new messages
-                if let lastMessage = channel.messages.last {
+                if let lastGroup = groupedMessages.last {
                     withAnimation(.easeOut(duration: 0.2)) {
-                        proxy.scrollTo(lastMessage.id, anchor: .bottom)
+                        proxy.scrollTo(lastGroup.id, anchor: .bottom)
                     }
+                }
+            }
+            .onChange(of: scrollToMessageIndex) { _, newIndex in
+                guard let index = newIndex,
+                      let groupId = findGroup(forMessageIndex: index) else { return }
+                
+                withAnimation(.easeInOut(duration: 0.3)) {
+                    proxy.scrollTo(groupId, anchor: .center)
+                }
+                
+                // Clear scroll target
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                    scrollToMessageIndex = nil
+                }
+            }
+        }
+    }
+    
+    private func getMessageIndex(for group: MessageGroup) -> Int? {
+        switch group {
+        case .regular(let message, _):
+            return channel.messages.firstIndex(where: { $0.id == message.id })
+        case .statusGroup(let messages):
+            if let firstMsg = messages.first {
+                return channel.messages.firstIndex(where: { $0.id == firstMsg.id })
+            }
+            return nil
+        }
+    }
+    
+    private func isGroupHighlighted(_ group: MessageGroup) -> Bool {
+        guard let highlightIndex = highlightedMessageIndex else { return false }
+        
+        switch group {
+        case .regular(let message, _):
+            if let index = channel.messages.firstIndex(where: { $0.id == message.id }) {
+                return index == highlightIndex
+            }
+        case .statusGroup(let messages):
+            for msg in messages {
+                if let index = channel.messages.firstIndex(where: { $0.id == msg.id }),
+                   index == highlightIndex {
+                    return true
+                }
+            }
+        }
+        return false
+    }
+    
+    // MARK: - Message Grouping Logic
+    
+    private func groupMessages(_ messages: [IRCChatMessage]) -> [MessageGroup] {
+        var groups: [MessageGroup] = []
+        var currentStatusGroup: [IRCChatMessage] = []
+        
+        for (index, message) in messages.enumerated() {
+            let isStatusEvent = [.join, .part, .quit, .nick].contains(message.type)
+            
+            if isStatusEvent {
+                // Accumulate status events
+                currentStatusGroup.append(message)
+            } else {
+                // Flush any accumulated status events
+                if !currentStatusGroup.isEmpty {
+                    groups.append(.statusGroup(currentStatusGroup))
+                    currentStatusGroup = []
+                }
+                
+                // Check if we should group with previous message
+                let previousIndex = index - 1
+                let shouldGroup = previousIndex >= 0 &&
+                    !isStatusEvent &&
+                    shouldGroupWith(message, previous: messages[previousIndex])
+                
+                groups.append(.regular(message, isGrouped: shouldGroup))
+            }
+        }
+        
+        // Flush any remaining status events
+        if !currentStatusGroup.isEmpty {
+            groups.append(.statusGroup(currentStatusGroup))
+        }
+        
+        return groups
+    }
+    
+    private func shouldGroupWith(_ message: IRCChatMessage, previous: IRCChatMessage) -> Bool {
+        // Only group regular messages from same sender
+        guard message.type == .message || message.type == .action,
+              previous.type == .message || previous.type == .action,
+              message.sender == previous.sender else {
+            return false
+        }
+        
+        // Group if within 5 minutes
+        let timeDifference = message.timestamp.timeIntervalSince(previous.timestamp)
+        return timeDifference <= 300 // 5 minutes
+    }
+}
+
+// MARK: - Message Group Model
+
+enum MessageGroup: Identifiable {
+    case regular(IRCChatMessage, isGrouped: Bool)
+    case statusGroup([IRCChatMessage])
+    
+    var id: UUID {
+        switch self {
+        case .regular(let message, _):
+            return message.id
+        case .statusGroup(let messages):
+            // Use first message's ID for the group
+            return messages.first?.id ?? UUID()
+        }
+    }
+}
+
+// MARK: - Message Group View
+
+struct MessageGroupView: View {
+    let group: MessageGroup
+    let channel: IRCChannel
+    let messageIndex: Int?
+    let isHighlighted: Bool
+    let isExpanded: Bool
+    let onToggleExpand: () -> Void
+    
+    var body: some View {
+        Group {
+            switch group {
+            case .regular(let message, let isGrouped):
+                MessageRowView(message: message, isGrouped: isGrouped, channel: channel)
+                
+            case .statusGroup(let messages):
+                StatusGroupView(
+                    messages: messages,
+                    isExpanded: isExpanded,
+                    onToggle: onToggleExpand
+                )
+            }
+        }
+        .background(
+            isHighlighted
+                ? Color.accentColor.opacity(0.15)
+                : Color.clear
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .animation(.easeInOut(duration: 0.3), value: isHighlighted)
+    }
+}
+
+// MARK: - Status Group View
+
+struct StatusGroupView: View {
+    let messages: [IRCChatMessage]
+    let isExpanded: Bool
+    let onToggle: () -> Void
+    @Environment(\.themeColors) private var themeColors
+    
+    private var summaryText: String {
+        let joins = messages.filter { $0.type == .join }.count
+        let parts = messages.filter { $0.type == .part }.count
+        let quits = messages.filter { $0.type == .quit }.count
+        let nicks = messages.filter { $0.type == .nick }.count
+        
+        var components: [String] = []
+        if joins > 0 { components.append("\(joins) joined") }
+        if parts > 0 { components.append("\(parts) left") }
+        if quits > 0 { components.append("\(quits) quit") }
+        if nicks > 0 { components.append("\(nicks) changed nick") }
+        
+        return components.joined(separator: ", ")
+    }
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            if isExpanded {
+                // Show all status messages
+                ForEach(messages) { message in
+                    StatusMessageRow(message: message)
+                }
+            } else {
+                // Show collapsed summary
+                HStack(spacing: 8) {
+                    // Fixed gutter spacing
+                    Color.clear.frame(width: 50 + 16 + 12) // timestamp + icon + spacing
+                    
+                    HStack(spacing: 6) {
+                        Image(systemName: "ellipsis.circle")
+                            .font(.caption)
+                            .foregroundStyle(themeColors.secondaryText.opacity(0.6))
+                            .controlSize(.small)
+                        
+                        Text(summaryText)
+                            .font(.caption)
+                            .foregroundStyle(themeColors.secondaryText.opacity(0.7))
+                        
+                        Text("(tap to expand)")
+                            .font(.caption2)
+                            .foregroundStyle(themeColors.secondaryText.opacity(0.5))
+                    }
+                }
+                .padding(.vertical, 2)
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    onToggle()
                 }
             }
         }
     }
 }
 
-struct MessageRowView: View {
+struct StatusMessageRow: View {
     let message: IRCChatMessage
+    @Environment(\.themeColors) private var themeColors
     
-    var messageColor: Color {
+    private var icon: String {
         switch message.type {
-        case .message:
-            return .primary
-        case .action:
-            return .purple
-        case .notice:
-            return .orange
-        case .join:
-            return .green
-        case .part, .quit:
-            return .red
-        case .nick:
-            return .blue
-        case .topic:
-            return .cyan
-        case .system:
-            return .secondary
-        }
-    }
-    
-    var messageIcon: String {
-        switch message.type {
-        case .message:
-            return "bubble.left"
-        case .action:
-            return "star.fill"
-        case .notice:
-            return "exclamationmark.triangle"
-        case .join:
-            return "arrow.right.circle"
-        case .part, .quit:
-            return "arrow.left.circle"
-        case .nick:
-            return "person.circle"
-        case .topic:
-            return "text.bubble"
-        case .system:
-            return "info.circle"
+        case .join: return "arrow.right.circle"
+        case .part, .quit: return "arrow.left.circle"
+        case .nick: return "person.circle"
+        default: return "info.circle"
         }
     }
     
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
-            // Timestamp
+            // Gutter: Timestamp
             Text(message.timestamp, style: .time)
-                .font(.caption)
-                .foregroundStyle(.secondary)
+                .font(.caption2)
+                .foregroundStyle(themeColors.secondaryText.opacity(0.5))
                 .frame(width: 50, alignment: .trailing)
             
-            // Message type icon
-            Image(systemName: messageIcon)
-                .font(.caption)
-                .foregroundStyle(messageColor.opacity(0.7))
+            // Icon
+            Image(systemName: icon)
+                .font(.caption2)
+                .foregroundStyle(themeColors.secondaryText.opacity(0.4))
                 .frame(width: 16)
+                .controlSize(.small)
             
-            // Message content
+            // Content
+            Text(message.content)
+                .font(.caption)
+                .foregroundStyle(themeColors.secondaryText.opacity(0.7))
+        }
+        .padding(.vertical, 2)
+        .padding(.horizontal, 8)
+    }
+}
+
+// MARK: - Message Row View
+
+struct MessageRowView: View {
+    let message: IRCChatMessage
+    let isGrouped: Bool
+    let channel: IRCChannel
+    
+    @Environment(\.themeColors) private var themeColors
+    @State private var urlPreview: URLPreview?
+    @State private var isLoadingPreview = false
+    @State private var isHovering = false
+    
+    // Detect if current user is mentioned
+    private var isMention: Bool {
+        guard let connection = channel.server.connection else { return false }
+        let messageText = String(message.content.characters).lowercased()
+        let nickname = connection.currentNickname.lowercased()
+        return messageText.contains(nickname)
+    }
+    
+    private var messageIcon: String {
+        switch message.type {
+        case .message: return "bubble.left"
+        case .action: return "star.fill"
+        case .notice: return "exclamationmark.triangle"
+        case .topic: return "text.bubble"
+        case .system: return "info.circle"
+        default: return "info.circle"
+        }
+    }
+    
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            // GUTTER: Fixed-width timestamp (Tertiary color)
+            Group {
+                if isGrouped && !isHovering {
+                    // Hidden timestamp, shown on hover
+                    Text("")
+                        .font(.caption2)
+                        .frame(width: 50, alignment: .trailing)
+                } else {
+                    Text(message.timestamp, style: .time)
+                        .font(.caption2)
+                        .foregroundStyle(themeColors.secondaryText.opacity(0.6))
+                        .frame(width: 50, alignment: .trailing)
+                }
+            }
+            
+            // GUTTER: Fixed-width icon
+            Image(systemName: messageIcon)
+                .font(.caption2)
+                .foregroundStyle(themeColors.accent.opacity(isGrouped ? 0.3 : 0.6))
+                .frame(width: 16)
+                .opacity(isGrouped && !isHovering ? 0.3 : 1.0)
+            
+            // Message content with perfect vertical alignment
             VStack(alignment: .leading, spacing: 4) {
-                // Sender name with color
-                if message.type == .message || message.type == .action {
+                // Sender name (Primary color, hidden when grouped)
+                if !isGrouped {
                     Text(message.sender)
-                        .font(.caption)
+                        .font(.callout)
                         .fontWeight(.semibold)
                         .foregroundStyle(NicknameColorizer.color(for: message.sender))
                 }
                 
-                // Message text with rich formatting
-                HighPerformanceTextView(content: message.content)
-                    .textSelection(.enabled)
+                // Message text (Secondary color for body)
+                HighPerformanceTextView(
+                    content: message.content,
+                    baseColor: themeColors.text
+                )
+                .textSelection(.enabled)
+                
+                // URL preview if available
+                if let preview = urlPreview {
+                    URLPreviewView(preview: preview)
+                        .frame(maxWidth: 400)
+                        .padding(.top, 4)
+                } else if isLoadingPreview {
+                    HStack(spacing: 6) {
+                        ProgressView()
+                            .scaleEffect(0.6)
+                            .controlSize(.small)
+                        Text("Loading preview...")
+                            .font(.caption2)
+                            .foregroundStyle(themeColors.secondaryText.opacity(0.6))
+                    }
+                    .padding(.top, 4)
+                }
             }
             
             Spacer(minLength: 0)
         }
-        .padding(.vertical, 4)
+        .padding(.vertical, isGrouped ? 2 : 6)
         .padding(.horizontal, 8)
         .background(
-            message.type == .message || message.type == .action
-                ? Color.clear
-                : messageColor.opacity(0.05)
+            // Subtle highlight for mentions
+            isMention
+                ? themeColors.accent.opacity(0.08)
+                : Color.clear
         )
-        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+        .onHover { hovering in
+            withAnimation(.easeInOut(duration: 0.15)) {
+                isHovering = hovering
+            }
+        }
+        .task {
+            // Only fetch previews for regular messages
+            guard message.type == .message else { return }
+            
+            // Extract URLs from message
+            let messageText = String(message.content.characters)
+            let urls = messageText.extractURLs()
+            
+            // Fetch preview for the first URL
+            if let firstURL = urls.first {
+                isLoadingPreview = true
+                urlPreview = await URLPreviewFetcher.shared.fetchPreview(for: firstURL)
+                isLoadingPreview = false
+            }
+        }
     }
 }
 
@@ -127,24 +456,40 @@ struct MessageRowView: View {
 /// This view uses NSTextLayoutManager for optimal performance with large chat histories
 struct HighPerformanceTextView: View {
     let content: AttributedString
+    let baseColor: Color
+    
+    // PERFORMANCE: Static URL detector cached across all instances
+    private static let urlDetector = try? NSDataDetector(
+        types: NSTextCheckingResult.CheckingType.link.rawValue
+    )
+    
+    init(content: AttributedString, baseColor: Color = .primary) {
+        self.content = content
+        self.baseColor = baseColor
+    }
     
     var processedContent: AttributedString {
         var attributed = content
         
-        // Detect and linkify URLs
-        let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue)
+        // Apply base color to text
+        if let range = attributed.range(of: String(attributed.characters)) {
+            attributed[range].foregroundColor = baseColor
+        }
+        
+        // Detect and linkify URLs using cached detector
         let text = String(attributed.characters)
-        let matches = detector?.matches(in: text, range: NSRange(text.startIndex..., in: text))
+        let matches = Self.urlDetector?.matches(
+            in: text,
+            range: NSRange(text.startIndex..., in: text)
+        )
         
         for match in matches ?? [] {
-            if let range = Range(match.range, in: text) {
-                let attributedRange = attributed.range(of: String(text[range]))
-                if let attributedRange = attributedRange {
-                    attributed[attributedRange].foregroundColor = .blue
-                    attributed[attributedRange].underlineStyle = .single
-                    if let url = match.url {
-                        attributed[attributedRange].link = url
-                    }
+            if let range = Range(match.range, in: text),
+               let attributedRange = attributed.range(of: String(text[range])) {
+                attributed[attributedRange].foregroundColor = .blue
+                attributed[attributedRange].underlineStyle = .single
+                if let url = match.url {
+                    attributed[attributedRange].link = url
                 }
             }
         }
@@ -181,25 +526,69 @@ struct NSTextLayoutView: NSViewRepresentable {
     }
 }
 
-#Preview {
-    let channel = IRCChannel(
-        name: "#swift",
-        server: IRCServer(config: IRCServerConfig(hostname: "test", nickname: "user"))
-    )
+#Preview("Modern Message Grouping") {
+    @Previewable @State var scrollIndex: Int? = nil
+    @Previewable @State var highlightIndex: Int? = nil
     
-    var styledMessage = AttributedString("Check out this link: https://swift.org")
+    let server = IRCServer(config: IRCServerConfig(hostname: "irc.libera.chat", nickname: "TestUser"))
+    let channel = IRCChannel(name: "#swift", server: server)
+    
+    // Simulate connection for mention detection
+    let connection = IRCConnection(config: server.config)
+    server.connection = connection
+    
+    // Create messages with grouping scenarios
+    let now = Date()
+    
+    var styledMessage = AttributedString("Check out this link: https://swift.org for Swift resources")
     if let range = styledMessage.range(of: "https://swift.org") {
         styledMessage[range].foregroundColor = .blue
         styledMessage[range].underlineStyle = .single
     }
     
     channel.messages = [
-        IRCChatMessage(sender: "Alice", content: "Welcome to the channel!", type: .join),
-        IRCChatMessage(sender: "Bob", content: "Hey everyone! 👋", type: .message),
-        IRCChatMessage(sender: "Charlie", content: styledMessage, type: .message),
-        IRCChatMessage(sender: "System", content: "Topic: Swift programming", type: .topic),
+        // Status events group
+        IRCChatMessage(sender: "Alice", content: "Alice has joined #swift", type: .join, timestamp: now.addingTimeInterval(-300)),
+        IRCChatMessage(sender: "Bob", content: "Bob has joined #swift", type: .join, timestamp: now.addingTimeInterval(-290)),
+        IRCChatMessage(sender: "Charlie", content: "Charlie has joined #swift", type: .join, timestamp: now.addingTimeInterval(-280)),
+        
+        // Regular messages
+        IRCChatMessage(sender: "Alice", content: "Hey everyone! Welcome to #swift", type: .message, timestamp: now.addingTimeInterval(-270)),
+        IRCChatMessage(sender: "Bob", content: "Thanks Alice! Happy to be here 👋", type: .message, timestamp: now.addingTimeInterval(-260)),
+        IRCChatMessage(sender: "Bob", content: "Has anyone tried SwiftUI 6?", type: .message, timestamp: now.addingTimeInterval(-250)),
+        
+        // Grouped messages (same sender within 5 min)
+        IRCChatMessage(sender: "Alice", content: "I have! It's amazing", type: .message, timestamp: now.addingTimeInterval(-240)),
+        IRCChatMessage(sender: "Alice", content: "The new APIs are so clean", type: .message, timestamp: now.addingTimeInterval(-230)),
+        IRCChatMessage(sender: "Alice", content: styledMessage, type: .message, timestamp: now.addingTimeInterval(-220)),
+        
+        // Mention (with TestUser)
+        IRCChatMessage(sender: "Charlie", content: "Hey TestUser, what do you think?", type: .message, timestamp: now.addingTimeInterval(-210)),
+        
+        // More status events
+        IRCChatMessage(sender: "Dave", content: "Dave has quit (Connection reset)", type: .quit, timestamp: now.addingTimeInterval(-200)),
+        IRCChatMessage(sender: "Eve", content: "Eve has left #swift", type: .part, timestamp: now.addingTimeInterval(-190)),
+        
+        // System message
+        IRCChatMessage(sender: "System", content: "Topic: Swift programming and iOS development", type: .topic, timestamp: now.addingTimeInterval(-180)),
+        
+        // Recent messages
+        IRCChatMessage(sender: "Bob", content: "The documentation is really helpful", type: .message, timestamp: now.addingTimeInterval(-60)),
+        IRCChatMessage(sender: "Alice", content: "Agreed! Apple did a great job", type: .message, timestamp: now.addingTimeInterval(-30)),
     ]
     
-    return MessageListView(channel: channel)
-        .frame(height: 400)
+    channel.users = [
+        IRCUser(nickname: "Alice", modes: ["o"]),
+        IRCUser(nickname: "Bob", modes: ["v"]),
+        IRCUser(nickname: "Charlie"),
+        IRCUser(nickname: "TestUser"),
+    ]
+    
+    return MessageListView(
+        channel: channel,
+        scrollToMessageIndex: $scrollIndex,
+        highlightedMessageIndex: $highlightIndex
+    )
+    .frame(height: 600)
+    .padding()
 }

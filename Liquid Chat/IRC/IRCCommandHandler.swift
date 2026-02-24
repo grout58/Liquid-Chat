@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import SwiftUI
 
 /// Handles IRC client commands (starting with /)
 class IRCCommandHandler {
@@ -163,6 +164,8 @@ class IRCCommandHandler {
         // Server information
         case "list":
             connection.send(command: "LIST")
+            // Show the channel list dialog
+            chatState?.showingChannelListForServer = channel.server
             
         case "names":
             connection.send(command: "NAMES", parameters: [channel.name])
@@ -190,6 +193,10 @@ class IRCCommandHandler {
         case "clear":
             channel.messages.removeAll()
             
+        // Secret Zelda 40th Anniversary Easter Egg 🗡️
+        case "triforce", "zelda":
+            showZeldaEasterEgg(in: channel)
+            
         default:
             // Unknown command - add system message
             let systemMessage = IRCChatMessage(
@@ -211,6 +218,8 @@ class IRCCommandHandler {
         Modes: /op nick, /deop nick, /voice nick, /kick nick [reason]
         Server: /list, /names, /motd, /away [message], /quit [message]
         Client: /clear (clear messages), /help (this message)
+        
+        💎 Hint: Try seeking the golden power... (/triforce)
         """
         
         let message = IRCChatMessage(
@@ -219,5 +228,67 @@ class IRCCommandHandler {
             type: .system
         )
         channel.messages.append(message)
+    }
+    
+    private func showZeldaEasterEgg(in channel: IRCChannel) {
+        // Create the PROPER Triforce using triangle symbols
+        let triforceArt = """
+                           ▲
+                          ▲ ▲
+                         ▲   ▲
+                        ▲ ▲ ▲ ▲
+                       ▲       ▲
+                      ▲ ▲     ▲ ▲
+                     ▲   ▲   ▲   ▲
+                    ▲ ▲ ▲ ▲ ▲ ▲ ▲ ▲
+        """
+        
+        var zeldaContent = AttributedString("""
+        
+        ⚔️  THE LEGEND OF ZELDA - 40TH ANNIVERSARY (1986-2026) ⚔️
+        
+        \(triforceArt)
+        
+                  ✨ THE TRIFORCE ✨
+        
+        "It's dangerous to go alone! Take this."
+        
+        🗡️ Master Sword obtained!
+        💚 You found a Heart Container!
+        🎵 *Zelda Theme plays*
+        
+        Fun Facts:
+        • The first Zelda game was released on February 21, 1986
+        • Link has saved Hyrule across 20+ games
+        • "The Legend of Zelda" was one of the first games to have a save feature
+        • Shigeru Miyamoto named Zelda after Zelda Fitzgerald
+        
+        Easter Egg: You've discovered the secret of Liquid Chat!
+        Type /help to see other commands, or continue your adventure in IRC! 🏹
+        
+        """)
+        
+        // Apply gold color and monospace to the triforce
+        if let triforceRange = zeldaContent.range(of: triforceArt) {
+            zeldaContent[triforceRange].foregroundColor = Color(red: 1.0, green: 0.84, blue: 0.0) // Gold color
+            zeldaContent[triforceRange].font = .monospaced(.system(.body))()
+        }
+        
+        let message = IRCChatMessage(
+            sender: "🧙 Old Man",
+            content: zeldaContent,
+            type: .system
+        )
+        channel.messages.append(message)
+        
+        // Add a follow-up message with a fun surprise
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+            let followUp = IRCChatMessage(
+                sender: "🧚 Navi",
+                content: "Hey! Listen! You can enable the Hyrule theme in Settings → Appearance for a full Zelda experience! 🌲✨",
+                type: .system
+            )
+            channel.messages.append(followUp)
+        }
     }
 }

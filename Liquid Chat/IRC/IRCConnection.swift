@@ -13,6 +13,22 @@ private func log(_ message: String, level: ConsoleLogEntry.LogLevel = .info) {
     ConsoleLogger.shared.log(message, level: level, category: "IRC")
 }
 
+// MARK: - String Extension for SASL Chunking
+
+extension String {
+    func split(every length: Int) -> [Substring] {
+        guard length > 0 else { return [] }
+        var result: [Substring] = []
+        var index = startIndex
+        while index < endIndex {
+            let nextIndex = self.index(index, offsetBy: length, limitedBy: endIndex) ?? endIndex
+            result.append(self[index..<nextIndex])
+            index = nextIndex
+        }
+        return result
+    }
+}
+
 /// Represents the connection state of an IRC server
 enum IRCConnectionState: Equatable {
     case disconnected
@@ -24,15 +40,17 @@ enum IRCConnectionState: Equatable {
 }
 
 /// IRC authentication methods
-enum IRCAuthMethod {
+enum IRCAuthMethod: String, Codable, CaseIterable {
     case none
     case password
     case sasl
+    case saslExternal
     case nickserv
 }
 
 /// IRC connection configuration
-struct IRCServerConfig {
+struct IRCServerConfig: Codable, Identifiable, Equatable, Hashable {
+    let id: UUID
     let hostname: String
     let port: UInt16
     let useSSL: Bool
@@ -41,8 +59,11 @@ struct IRCServerConfig {
     let realname: String
     let password: String?
     let authMethod: IRCAuthMethod
+    var autoConnect: Bool
+    var savedName: String? // Optional friendly name for saved servers
     
     init(
+        id: UUID = UUID(),
         hostname: String,
         port: UInt16 = 6667,
         useSSL: Bool = false,
@@ -50,8 +71,11 @@ struct IRCServerConfig {
         username: String? = nil,
         realname: String? = nil,
         password: String? = nil,
-        authMethod: IRCAuthMethod = .none
+        authMethod: IRCAuthMethod = .none,
+        autoConnect: Bool = false,
+        savedName: String? = nil
     ) {
+        self.id = id
         self.hostname = hostname
         self.port = useSSL ? 6697 : port
         self.useSSL = useSSL
@@ -60,6 +84,12 @@ struct IRCServerConfig {
         self.realname = realname ?? nickname
         self.password = password
         self.authMethod = authMethod
+        self.autoConnect = autoConnect
+        self.savedName = savedName
+    }
+    
+    var displayName: String {
+        savedName ?? "\(nickname)@\(hostname)"
     }
 }
 
@@ -77,6 +107,10 @@ class IRCConnection {
     private var capabilitiesRequested: Set<String> = []
     private var capabilitiesAcknowledged: Set<String> = []
     private var sentCapEnd = false
+    private var capNegotiationTimer: DispatchWorkItem?
+    
+    // Batch message handling (IRCv3)
+    private var currentBatches: [String: [IRCMessage]] = [:]
     
     // Connection metadata
     private(set) var serverName: String?
@@ -114,9 +148,15 @@ class IRCConnection {
         }
         
         // Create connection directly - sandbox is now configured properly
+        guard let port = NWEndpoint.Port(rawValue: config.port) else {
+            log("Invalid port number: \(config.port)", level: .error)
+            state = .error("Invalid port number: \(config.port)")
+            return
+        }
+        
         let endpoint = NWEndpoint.hostPort(
             host: NWEndpoint.Host(config.hostname),
-            port: NWEndpoint.Port(rawValue: config.port)!
+            port: port
         )
         
         log("Creating connection to \(endpoint)")
@@ -194,12 +234,23 @@ class IRCConnection {
         // Step 1: Request capabilities (CAP LS 302)
         send(command: "CAP", parameters: ["LS", "302"])
         
+        // Set a timeout for capability negotiation
+        // If server doesn't respond, continue anyway
+        capNegotiationTimer = DispatchWorkItem { [weak self] in
+            guard let self = self else { return }
+            if !self.sentCapEnd {
+                log("CAP negotiation timeout - ending negotiation", level: .warning)
+                self.endCapabilityNegotiation()
+            }
+        }
+        if let timer = capNegotiationTimer {
+            DispatchQueue.global().asyncAfter(deadline: .now() + IRC.capNegotiationTimeout, execute: timer)
+        }
+        
         // Step 2: Send PASS if using password authentication
         if let password = config.password, config.authMethod == .password {
-            // Handle passwords that start with ':' or contain spaces
-            let formattedPassword = (password.hasPrefix(":") || password.contains(" ")) 
-                ? ":\(password)" 
-                : password
+            // Only prefix with colon if password contains spaces (per IRC RFC)
+            let formattedPassword = password.contains(" ") ? ":\(password)" : password
             log("Sending PASS (hidden)", level: .debug)
             send(command: "PASS", parameters: [formattedPassword])
         }
@@ -238,7 +289,10 @@ class IRCConnection {
     
     /// Send raw IRC message
     func send(raw message: String) {
-        let data = "\(message)\r\n".data(using: .utf8)!
+        guard let data = "\(message)\r\n".data(using: .utf8) else {
+            log("Failed to encode message as UTF-8: \(message)", level: .error)
+            return
+        }
         log("→ \(message)", level: .debug)
         
         connection?.send(content: data, completion: .contentProcessed { [weak self] error in
@@ -282,7 +336,8 @@ class IRCConnection {
         receiveBuffer.append(data)
         
         // Split by CRLF
-        while let range = receiveBuffer.range(of: "\r\n".data(using: .utf8)!) {
+        guard let crlfData = "\r\n".data(using: .utf8) else { return }
+        while let range = receiveBuffer.range(of: crlfData) {
             let messageData = receiveBuffer.subdata(in: 0..<range.lowerBound)
             receiveBuffer.removeSubrange(0..<range.upperBound)
             
@@ -302,6 +357,12 @@ class IRCConnection {
             return
         }
         
+        // Handle IRCv3 BATCH messages
+        if parsed.command == "BATCH" {
+            handleBatch(parsed)
+            return // Don't forward batch markers to delegate
+        }
+        
         // Handle server-specific messages
         switch parsed.command {
         case "PING":
@@ -312,6 +373,17 @@ class IRCConnection {
             
         case "CAP":
             handleCapabilityResponse(parsed)
+            
+        case "AUTHENTICATE":
+            handleAuthenticateResponse(parsed)
+            
+        case "900": // RPL_LOGGEDIN
+            log("✓ SASL authentication successful", level: .info)
+            endCapabilityNegotiation()
+            
+        case "904", "905": // ERR_SASLFAIL, ERR_SASLTOOLONG
+            log("✗ SASL authentication failed", level: .error)
+            endCapabilityNegotiation()
             
         case "001": // RPL_WELCOME
             log("✓ Registered successfully", level: .info)
@@ -329,6 +401,13 @@ class IRCConnection {
             break
         }
         
+        // Check if this message is part of a batch
+        if let batchID = parsed.batchID, currentBatches[batchID] != nil {
+            // Add to batch instead of forwarding immediately
+            currentBatches[batchID]?.append(parsed)
+            return
+        }
+        
         // Forward to delegate
         Task { @MainActor in
             self.delegate?.connection(self, didReceiveMessage: parsed)
@@ -343,21 +422,59 @@ class IRCConnection {
         switch subcommand {
         case "LS":
             // Server lists available capabilities
+            // Format: CAP * LS :cap1 cap2 cap3 (final)
+            // Format: CAP * LS * :cap1 cap2 cap3 (more to come)
             if message.parameters.count >= 3 {
-                let caps = message.parameters[2].split(separator: " ").map(String.init)
+                let isMultiline = message.parameters.count >= 4 && message.parameters[2] == "*"
+                let capString = isMultiline ? message.parameters[3] : message.parameters[2]
+                let caps = capString.split(separator: " ").map(String.init)
+                
+                log("Available capabilities: \(caps.joined(separator: ", "))\(isMultiline ? " (more coming...)" : "")", level: .debug)
+                
+                // If this is multiline, wait for the final LS
+                if isMultiline {
+                    return
+                }
+                
+                // Build list of capabilities we want to request
+                var requestedCaps: [String] = []
                 
                 // Request SASL if available and needed
-                var requestedCaps: [String] = []
-                if caps.contains("sasl") && config.authMethod == .sasl {
+                if caps.contains("sasl") && (config.authMethod == .sasl || config.authMethod == .saslExternal) {
                     requestedCaps.append("sasl")
                 }
                 
+                // Request IRCv3 capabilities
+                if caps.contains("multi-prefix") {
+                    requestedCaps.append("multi-prefix")
+                }
+                if caps.contains("server-time") {
+                    requestedCaps.append("server-time")
+                }
+                if caps.contains("message-tags") {
+                    requestedCaps.append("message-tags")
+                }
+                if caps.contains("batch") {
+                    requestedCaps.append("batch")
+                }
+                
+                // ZNC bouncer support
+                if caps.contains("znc.in/playback") {
+                    requestedCaps.append("znc.in/playback")
+                }
+                
                 if !requestedCaps.isEmpty {
+                    log("Requesting capabilities: \(requestedCaps.joined(separator: ", "))", level: .info)
                     send(command: "CAP", parameters: ["REQ", requestedCaps.joined(separator: " ")])
                     capabilitiesRequested.formUnion(requestedCaps)
                 } else {
+                    log("No capabilities to request, ending negotiation", level: .debug)
                     endCapabilityNegotiation()
                 }
+            } else {
+                // Malformed CAP LS or no capabilities available
+                log("No capabilities available or malformed CAP LS", level: .debug)
+                endCapabilityNegotiation()
             }
             
         case "ACK":
@@ -366,9 +483,29 @@ class IRCConnection {
                 let caps = message.parameters[2].split(separator: " ").map(String.init)
                 capabilitiesAcknowledged.formUnion(caps)
                 
+                log("✓ Capabilities acknowledged: \(caps.joined(separator: ", "))", level: .info)
+                
                 // If SASL was acknowledged, begin SASL auth
                 if caps.contains("sasl") {
-                    send(command: "AUTHENTICATE", parameters: ["PLAIN"])
+                    if config.authMethod == .saslExternal {
+                        send(command: "AUTHENTICATE", parameters: ["EXTERNAL"])
+                    } else if config.authMethod == .sasl {
+                        send(command: "AUTHENTICATE", parameters: ["PLAIN"])
+                    } else {
+                        // SASL capability acknowledged but we're not using it
+                        endCapabilityNegotiation()
+                    }
+                } else {
+                    // No SASL in this ACK, end negotiation if not waiting for SASL
+                    if config.authMethod != .sasl && config.authMethod != .saslExternal {
+                        endCapabilityNegotiation()
+                    }
+                }
+                
+                // Request ZNC playback if available
+                if caps.contains("znc.in/playback") {
+                    log("Requesting ZNC playback history", level: .info)
+                    send(raw: "PRIVMSG *playback :PLAY * 0")
                 }
             }
             
@@ -381,10 +518,85 @@ class IRCConnection {
         }
     }
     
+    private func handleAuthenticateResponse(_ message: IRCMessage) {
+        guard message.parameters.count >= 1 else { return }
+        
+        // Server sends "+" to request SASL credentials
+        if message.parameters[0] == "+" {
+            // Handle SASL EXTERNAL (certificate-based auth)
+            if config.authMethod == .saslExternal {
+                // SASL EXTERNAL uses empty response (certificate is already provided by TLS)
+                send(command: "AUTHENTICATE", parameters: ["+"])
+                return
+            }
+            
+            // Handle SASL PLAIN (username/password auth)
+            guard let password = config.password else {
+                log("SASL requested but no password configured", level: .error)
+                send(command: "AUTHENTICATE", parameters: ["*"]) // Abort SASL
+                endCapabilityNegotiation()
+                return
+            }
+            
+            // SASL PLAIN format: \0username\0password
+            let authString = "\0\(config.username)\0\(password)"
+            
+            if let authData = authString.data(using: .utf8) {
+                let base64 = authData.base64EncodedString()
+                
+                // Split into 400-byte chunks if needed (IRC line limit)
+                if base64.count <= 400 {
+                    send(command: "AUTHENTICATE", parameters: [base64])
+                } else {
+                    // Handle chunked SASL (rarely needed)
+                    let chunks = base64.split(every: 400)
+                    for chunk in chunks {
+                        send(command: "AUTHENTICATE", parameters: [String(chunk)])
+                    }
+                    if base64.count % 400 == 0 {
+                        send(command: "AUTHENTICATE", parameters: ["+"])
+                    }
+                }
+            }
+        }
+    }
+    
     private func endCapabilityNegotiation() {
         guard !sentCapEnd else { return }
+        
+        // Cancel the timeout timer
+        capNegotiationTimer?.cancel()
+        capNegotiationTimer = nil
+        
+        log("Ending capability negotiation", level: .info)
         send(command: "CAP", parameters: ["END"])
         sentCapEnd = true
+    }
+    
+    private func handleBatch(_ message: IRCMessage) {
+        guard message.parameters.count >= 1 else { return }
+        
+        let batchParam = message.parameters[0]
+        
+        if batchParam.hasPrefix("+") {
+            // Start of batch
+            let batchID = String(batchParam.dropFirst())
+            currentBatches[batchID] = []
+            log("Started batch: \(batchID)", level: .debug)
+        } else if batchParam.hasPrefix("-") {
+            // End of batch
+            let batchID = String(batchParam.dropFirst())
+            if let batchMessages = currentBatches[batchID] {
+                log("Completed batch: \(batchID) with \(batchMessages.count) messages", level: .debug)
+                // Forward all batch messages to delegate at once
+                Task { @MainActor in
+                    for msg in batchMessages {
+                        self.delegate?.connection(self, didReceiveMessage: msg)
+                    }
+                }
+                currentBatches.removeValue(forKey: batchID)
+            }
+        }
     }
     
     private func handleNicknameInUse() {

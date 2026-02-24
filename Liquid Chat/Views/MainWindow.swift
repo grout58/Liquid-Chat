@@ -16,10 +16,6 @@ struct MainWindow: View {
     // Use shared settings directly without @State copy
     private var settings: AppSettings { AppSettings.shared }
     
-    init() {
-        ConsoleLogger.shared.log("Main window initialized", level: .debug, category: "App")
-    }
-    
     var body: some View {
         VSplitView {
             // Main chat interface

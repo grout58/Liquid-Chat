@@ -14,6 +14,28 @@ struct IRCMessage {
     let command: String
     let parameters: [String]
     
+    /// IRCv3 message tags (@key=value)
+    let tags: [String: String]
+    
+    /// Cached ISO8601 date formatter for server-time parsing (thread-safe)
+    private static let iso8601Formatter: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
+    
+    /// Server timestamp from IRCv3 server-time capability
+    /// Optimized: Uses cached formatter instead of creating new one each time
+    var serverTime: Date? {
+        guard let timeTag = tags["time"] else { return nil }
+        return Self.iso8601Formatter.date(from: timeTag)
+    }
+    
+    /// Batch ID from IRCv3 batch capability
+    var batchID: String? {
+        tags["batch"]
+    }
+    
     /// IRC user mask components
     var nick: String? {
         prefix?.components(separatedBy: "!").first
@@ -32,10 +54,30 @@ struct IRCMessage {
         prefix?.components(separatedBy: "@").last
     }
     
-    /// Parse an IRC message from a raw string (RFC 1459 format)
+    /// Parse an IRC message from a raw string (RFC 1459 format with IRCv3 tags)
     static func parse(_ raw: String) -> IRCMessage? {
         var remainder = raw
+        var tags: [String: String] = [:]
         var prefix: String?
+        
+        // Parse IRCv3 message tags (if present)
+        if remainder.hasPrefix("@") {
+            guard let spaceIndex = remainder.firstIndex(of: " ") else { return nil }
+            let tagString = String(remainder[remainder.index(after: remainder.startIndex)..<spaceIndex])
+            
+            // Parse tags: key=value;key2=value2
+            let tagPairs = tagString.split(separator: ";")
+            for pair in tagPairs {
+                let components = pair.split(separator: "=", maxSplits: 1)
+                if components.count == 2 {
+                    tags[String(components[0])] = String(components[1])
+                } else if components.count == 1 {
+                    tags[String(components[0])] = ""
+                }
+            }
+            
+            remainder = String(remainder[remainder.index(after: spaceIndex)...])
+        }
         
         // Parse prefix (if present)
         if remainder.hasPrefix(":") {
@@ -49,7 +91,7 @@ struct IRCMessage {
         
         // Parse command
         guard let commandEnd = remainder.firstIndex(of: " ") ?? remainder.indices.last else {
-            return IRCMessage(raw: raw, prefix: prefix, command: remainder.uppercased(), parameters: [])
+            return IRCMessage(raw: raw, prefix: prefix, command: remainder.uppercased(), parameters: [], tags: tags)
         }
         
         let command = String(remainder[..<commandEnd]).uppercased()
@@ -78,7 +120,7 @@ struct IRCMessage {
             }
         }
         
-        return IRCMessage(raw: raw, prefix: prefix, command: command, parameters: parameters)
+        return IRCMessage(raw: raw, prefix: prefix, command: command, parameters: parameters, tags: tags)
     }
     
     /// Format an IRC message for sending
