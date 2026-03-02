@@ -18,7 +18,8 @@ actor ChannelLogger {
     // Keep track of open file handles for better performance
     private var fileHandles: [String: FileHandle] = [:]
     private var lastAccessTime: [String: Date] = [:]
-    private nonisolated(unsafe) var cleanupTask: Task<Void, Never>?
+    // Singleton lives for the app lifetime; task is stored for reference only.
+    private var cleanupTask: Task<Void, Never>?
     
     private init() {
         // Setup base directory: ~/Library/Application Support/Liquid Chat/Logs
@@ -51,16 +52,6 @@ actor ChannelLogger {
         }
     }
     
-    deinit {
-        // Cancel cleanup task
-        cleanupTask?.cancel()
-        
-        // Close all open file handles
-        for (_, handle) in fileHandles {
-            try? handle.close()
-        }
-    }
-
     /// Close file handles that haven't been accessed in 5 minutes
     private func cleanupInactiveHandles() {
         let now = Date()

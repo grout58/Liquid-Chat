@@ -95,7 +95,7 @@ class IRCCommandHandler {
                 content: args,
                 type: .action
             )
-            channel.messages.append(message)
+            channel.appendMessage(message)
             
         case "notice":
             let noticeParts = args.split(separator: " ", maxSplits: 1)
@@ -204,7 +204,7 @@ class IRCCommandHandler {
                 content: "Unknown command: /\(command). Type /help for available commands.",
                 type: .system
             )
-            channel.messages.append(systemMessage)
+            channel.appendMessage(systemMessage)
         }
     }
     
@@ -227,7 +227,7 @@ class IRCCommandHandler {
             content: helpText,
             type: .system
         )
-        channel.messages.append(message)
+        channel.appendMessage(message)
     }
     
     private func showZeldaEasterEgg(in channel: IRCChannel) {
@@ -279,7 +279,7 @@ class IRCCommandHandler {
             content: zeldaContent,
             type: .system
         )
-        channel.messages.append(message)
+        channel.appendMessage(message)
         
         // Add a follow-up message with a fun surprise
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
@@ -288,7 +288,7 @@ class IRCCommandHandler {
                 content: "Hey! Listen! You can enable the Hyrule theme in Settings → Appearance for a full Zelda experience! 🌲✨",
                 type: .system
             )
-            channel.messages.append(followUp)
+            channel.appendMessage(followUp)
         }
     }
 }

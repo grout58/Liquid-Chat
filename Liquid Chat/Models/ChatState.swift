@@ -23,6 +23,9 @@ class ChatState: IRCConnectionDelegate {
     
     /// Server for which to show the channel list view
     var showingChannelListForServer: IRCServer?
+
+    /// Pending connection error alert (server + message)
+    var connectionAlert: ConnectionAlert?
     
     init() {
         // Initialize with empty state
@@ -40,6 +43,9 @@ class ChatState: IRCConnectionDelegate {
     /// Connects to an IRC server and observes its connection state
     /// - Parameter server: The server to connect to
     func connectToServer(_ server: IRCServer) {
+        server.manuallyDisconnected = false
+        server.reconnectDelay = 5.0
+        server.cancelReconnect()
         let connection = IRCConnection(config: server.config)
         connection.delegate = self
         server.connection = connection
@@ -97,12 +103,12 @@ class ChatState: IRCConnectionDelegate {
     /// Disconnects from an IRC server and cancels observation
     /// - Parameter server: The server to disconnect from
     func disconnectFromServer(_ server: IRCServer) {
+        server.manuallyDisconnected = true
+        server.cancelReconnect()
         server.connection?.disconnect()
         server.connection = nil
         server.isConnected = false
         server.connectionState = .disconnected
-        
-        // Cancel the observation task to prevent memory leaks
         server.cancelObservation()
     }
     
@@ -169,7 +175,7 @@ class ChatState: IRCConnectionDelegate {
             content: text,
             type: .message
         )
-        channel.messages.append(message)
+        channel.appendMessage(message)
     }
     
     // MARK: - IRCConnectionDelegate
@@ -189,11 +195,25 @@ class ChatState: IRCConnectionDelegate {
         Task { @MainActor in
             if let server = servers.first(where: { $0.connection === connection }) {
                 server.isConnected = true
-                
-                // Show channel join dialog after a delay
-                Task {
-                    try? await Task.sleep(for: .milliseconds(500))
-                    showingChannelJoinForServer = server
+                server.reconnectDelay = 5.0  // Reset backoff on successful registration
+
+                // Rejoin any previously joined channels
+                let previousChannels = server.channels.filter { $0.isJoined && !$0.isPrivateMessage }
+                if previousChannels.isEmpty {
+                    // No previously joined channels — show the join dialog
+                    Task {
+                        try? await Task.sleep(for: .milliseconds(500))
+                        showingChannelJoinForServer = server
+                    }
+                } else {
+                    // Rejoin all previously joined channels
+                    for channel in previousChannels {
+                        channel.isJoined = false  // Will be set true again on JOIN confirmation
+                        connection.join(channel: channel.name)
+                    }
+                    Task {
+                        await ConsoleLogger.shared.log("Rejoining \(previousChannels.count) channel(s) on \(server.config.hostname)", level: .info, category: "Connection")
+                    }
                 }
             }
         }
@@ -203,23 +223,54 @@ class ChatState: IRCConnectionDelegate {
         Task {
             await ConsoleLogger.shared.log("Disconnected from \(connection.config.hostname)", level: .warning, category: "Connection")
         }
-        
+
         Task { @MainActor in
             if let server = servers.first(where: { $0.connection === connection }) {
                 server.isConnected = false
                 server.connectionState = .disconnected
+                scheduleReconnect(for: server)
             }
         }
     }
-    
+
     nonisolated func connectionDidFail(_ connection: IRCConnection, error: Error) {
         Task {
             await ConsoleLogger.shared.log("Connection failed: \(error.localizedDescription)", level: .error, category: "Connection")
         }
-        
+
         Task { @MainActor in
             if let server = servers.first(where: { $0.connection === connection }) {
                 server.connectionState = .error(error.localizedDescription)
+                // Show alert once the backoff has maxed out (persistent failure)
+                if server.reconnectDelay >= 300 {
+                    connectionAlert = ConnectionAlert(
+                        server: server,
+                        message: error.localizedDescription
+                    )
+                }
+                scheduleReconnect(for: server)
+            }
+        }
+    }
+
+    /// Schedule a reconnect attempt with exponential backoff (5s → 10s → 20s … capped at 300s)
+    private func scheduleReconnect(for server: IRCServer) {
+        guard !server.manuallyDisconnected else { return }
+
+        let delay = server.reconnectDelay
+        // Double the delay for next attempt, cap at 5 minutes
+        server.reconnectDelay = min(server.reconnectDelay * 2, 300)
+
+        Task {
+            await ConsoleLogger.shared.log("Reconnecting to \(server.config.hostname) in \(Int(delay))s…", level: .info, category: "Connection")
+        }
+
+        server.reconnectTask = Task { [weak self, weak server] in
+            guard let self, let server else { return }
+            try? await Task.sleep(for: .seconds(delay))
+            guard !Task.isCancelled, !server.manuallyDisconnected else { return }
+            await MainActor.run {
+                self.connectToServer(server)
             }
         }
     }
@@ -326,8 +377,8 @@ class ChatState: IRCConnectionDelegate {
         
         // Use server timestamp if available (IRCv3 server-time capability)
         let timestamp = message.serverTime ?? Date()
-        let chatMessage = IRCChatMessage(sender: sender, content: text, type: .message, timestamp: timestamp)
-        channel.messages.append(chatMessage)
+        let chatMessage = IRCChatMessage(sender: sender, content: text, type: .message, timestamp: timestamp, batchID: message.batchID)
+        channel.appendMessage(chatMessage)
         
         // Log message to disk
         Task {
@@ -356,7 +407,7 @@ class ChatState: IRCConnectionDelegate {
                 content: "\(nick) has joined \(channelName)",
                 type: .join
             )
-            channel.messages.append(joinMessage)
+            channel.appendMessage(joinMessage)
             
             // If it's us, mark channel as joined
             if let connection = server.connection, nick == connection.currentNickname {
@@ -381,7 +432,7 @@ class ChatState: IRCConnectionDelegate {
                 content: "\(nick) has left \(channelName)",
                 type: .part
             )
-            channel.messages.append(partMessage)
+            channel.appendMessage(partMessage)
         }
     }
     
@@ -405,7 +456,7 @@ class ChatState: IRCConnectionDelegate {
                     content: "\(nick) has quit (\(quitMessage))",
                     type: .quit
                 )
-                channel.messages.append(systemMessage)
+                channel.appendMessage(systemMessage)
             }
         }
     }
@@ -530,7 +581,7 @@ class ChatState: IRCConnectionDelegate {
                     content: "\(oldNick) is now known as \(newNick)",
                     type: .nick
                 )
-                channel.messages.append(nickMessage)
+                channel.appendMessage(nickMessage)
             }
         }
         
@@ -587,7 +638,7 @@ class ChatState: IRCConnectionDelegate {
                 content: "\(setter) sets mode \(modeString)",
                 type: .system
             )
-            channel.messages.append(modeMessage)
+            channel.appendMessage(modeMessage)
         }
     }
     
@@ -609,7 +660,7 @@ class ChatState: IRCConnectionDelegate {
                 content: "\(kickedUser) was kicked by \(kicker) (\(reason))",
                 type: .part
             )
-            channel.messages.append(kickMessage)
+            channel.appendMessage(kickMessage)
             
             // If we were kicked, mark channel as not joined
             if let connection = server.connection, kickedUser == connection.currentNickname {
@@ -634,7 +685,7 @@ class ChatState: IRCConnectionDelegate {
                 content: "\(setter) changed the topic to: \(newTopic)",
                 type: .topic
             )
-            channel.messages.append(topicMessage)
+            channel.appendMessage(topicMessage)
         }
     }
     
@@ -656,7 +707,7 @@ class ChatState: IRCConnectionDelegate {
                 content: "\(nick) is \(user)@\(host) (\(realName))",
                 type: .system
             )
-            channel.messages.append(whoisMessage)
+            channel.appendMessage(whoisMessage)
         }
     }
     
@@ -674,7 +725,7 @@ class ChatState: IRCConnectionDelegate {
                 content: "\(nick) is connected to \(serverName) (\(serverInfo))",
                 type: .system
             )
-            channel.messages.append(whoisMessage)
+            channel.appendMessage(whoisMessage)
         }
     }
     
@@ -693,7 +744,7 @@ class ChatState: IRCConnectionDelegate {
                 content: "\(nick) has been idle for \(idleTime)",
                 type: .system
             )
-            channel.messages.append(whoisMessage)
+            channel.appendMessage(whoisMessage)
         }
     }
     
@@ -710,7 +761,7 @@ class ChatState: IRCConnectionDelegate {
                 content: "\(nick) is in channels: \(channels)",
                 type: .system
             )
-            channel.messages.append(whoisMessage)
+            channel.appendMessage(whoisMessage)
         }
     }
     
@@ -727,4 +778,11 @@ class ChatState: IRCConnectionDelegate {
             return "\(secs)s"
         }
     }
+}
+
+/// Data for a connection error alert
+struct ConnectionAlert: Identifiable {
+    let id = UUID()
+    let server: IRCServer
+    let message: String
 }

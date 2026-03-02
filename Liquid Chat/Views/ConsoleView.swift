@@ -257,10 +257,14 @@ struct ConsoleEntryView: View {
     
     @State private var isExpanded = false
     
+    static let timeFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "HH:mm:ss.SSS"
+        return f
+    }()
+
     var formattedTime: String {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "HH:mm:ss.SSS"
-        return formatter.string(from: entry.timestamp)
+        Self.timeFormatter.string(from: entry.timestamp)
     }
     
     var body: some View {

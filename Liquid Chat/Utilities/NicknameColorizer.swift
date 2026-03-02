@@ -8,18 +8,24 @@
 import SwiftUI
 
 struct NicknameColorizer {
-    /// Generate a consistent color for a nickname
-    static func color(for nickname: String) -> Color {
+    /// Generate a consistent color for a nickname, adapted for the current color scheme.
+    /// Dark mode uses higher brightness (0.85) so colors don't muddy against dark backgrounds.
+    /// Light mode uses lower brightness (0.6) and higher saturation so colors don't wash out.
+    static func color(for nickname: String, colorScheme: ColorScheme = .dark) -> Color {
         let hash = nickname.lowercased().hash
-        let hue = Double(abs(hash) % 360) / 360.0
-        
-        // Use vibrant colors with good saturation and lightness
-        return Color(hue: hue, saturation: 0.7, brightness: 0.8)
+        // Use .magnitude to avoid abs(Int.min) integer overflow (undefined behaviour)
+        let hue = Double(hash.magnitude % 360) / 360.0
+
+        switch colorScheme {
+        case .dark:
+            return Color(hue: hue, saturation: 0.7, brightness: 0.85)
+        default:
+            return Color(hue: hue, saturation: 0.85, brightness: 0.55)
+        }
     }
-    
+
     /// Get a contrasting text color (for use on colored backgrounds)
     static func textColor(for backgroundColor: Color) -> Color {
-        // Simple heuristic - could be improved with actual luminance calculation
         return .white
     }
 }

@@ -1,0 +1,29 @@
+# Xcode user-specific data
+xcuserdata/
+*.xcuserstate
+*.xcscmblueprint
+
+# Generated icons
+*.icns
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Build products
+build/
+DerivedData/
+*.o
+*.d
+
+# Swift Package Manager
+.build/
+Packages/
+Package.resolved
+
+# CocoaPods
+Pods/
+
+# Carthage
+Carthage/Build/

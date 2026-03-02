@@ -91,9 +91,18 @@ class IRCServer: Identifiable {
     var connectionState: ServerConnectionState = .disconnected
     var availableChannels: [IRCChannelListEntry] = []
     var isLoadingChannelList: Bool = false
-    
+
     /// Task for observing connection state changes (can be cancelled)
     var observationTask: Task<Void, Never>?
+
+    /// Whether the user manually disconnected (suppress auto-reconnect)
+    var manuallyDisconnected: Bool = false
+
+    /// Current reconnect delay for exponential backoff (seconds)
+    var reconnectDelay: TimeInterval = 5.0
+
+    /// Pending reconnect task
+    var reconnectTask: Task<Void, Never>?
     
     /// Actor-isolated buffer for thread-safe channel list updates
     private var channelListBuffer: ChannelListBuffer!
@@ -107,6 +116,12 @@ class IRCServer: Identifiable {
     func cancelObservation() {
         observationTask?.cancel()
         observationTask = nil
+    }
+
+    /// Cancel any pending reconnect task
+    func cancelReconnect() {
+        reconnectTask?.cancel()
+        reconnectTask = nil
     }
     
     /// Add channel to buffer for batched updates
@@ -145,9 +160,18 @@ class IRCChannel: Identifiable, Hashable {
     /// The key insight: SwiftUI is smart enough to only re-render visible rows in LazyVStack
     /// The MainActor saturation was from the double-hop, not from observation itself
     var messages: [IRCChatMessage] = []
-    
+
     /// Users array
     var users: [IRCUser] = []
+
+    /// Append a message, trimming the oldest entries if the user-configured limit is exceeded.
+    func appendMessage(_ message: IRCChatMessage) {
+        messages.append(message)
+        let limit = AppSettings.shared.messageHistoryLimit
+        if messages.count > limit {
+            messages.removeFirst(messages.count - limit)
+        }
+    }
     
     var isJoined: Bool = false
     
@@ -196,6 +220,9 @@ struct IRCChatMessage: Identifiable {
     let sender: String
     let content: AttributedString
     let type: MessageType
+    /// IRCv3 batch identifier — set when this message was delivered as part of a batch.
+    /// Used to visually group batch-replayed messages (e.g. CHATHISTORY) in the message list.
+    var batchID: String?
     
     enum MessageType {
         case message
@@ -209,17 +236,19 @@ struct IRCChatMessage: Identifiable {
         case system
     }
     
-    init(sender: String, content: String, type: MessageType = .message, timestamp: Date? = nil) {
+    init(sender: String, content: String, type: MessageType = .message, timestamp: Date? = nil, batchID: String? = nil) {
         self.timestamp = timestamp ?? Date()
         self.sender = sender
         self.content = AttributedString(content)
         self.type = type
+        self.batchID = batchID
     }
-    
-    init(sender: String, content: AttributedString, type: MessageType = .message, timestamp: Date? = nil) {
+
+    init(sender: String, content: AttributedString, type: MessageType = .message, timestamp: Date? = nil, batchID: String? = nil) {
         self.timestamp = timestamp ?? Date()
         self.sender = sender
         self.content = content
         self.type = type
+        self.batchID = batchID
     }
 }

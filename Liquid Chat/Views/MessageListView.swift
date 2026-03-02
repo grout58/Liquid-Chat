@@ -54,6 +54,10 @@ struct MessageListView: View {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 2) {
                     ForEach(Array(groupedMessages.enumerated()), id: \.element.id) { index, group in
+                        let prevBatchID = index > 0 ? groupedMessages[index - 1].batchID : nil
+                        if group.batchID != nil && group.batchID != prevBatchID {
+                            BatchSeparatorView()
+                        }
                         MessageGroupView(
                             group: group,
                             channel: channel,
@@ -194,6 +198,31 @@ enum MessageGroup: Identifiable {
             // Use first message's ID for the group
             return messages.first?.id ?? UUID()
         }
+    }
+
+    var batchID: String? {
+        switch self {
+        case .regular(let message, _):
+            return message.batchID
+        case .statusGroup(let messages):
+            return messages.first?.batchID
+        }
+    }
+}
+
+// MARK: - Batch Separator View
+
+struct BatchSeparatorView: View {
+    var body: some View {
+        HStack(spacing: 8) {
+            VStack { Divider() }
+            Text("replayed history")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+                .fixedSize()
+            VStack { Divider() }
+        }
+        .padding(.vertical, 6)
     }
 }
 
@@ -346,6 +375,7 @@ struct MessageRowView: View {
     var searchText: String? = nil
     
     @Environment(\.themeColors) private var themeColors
+    @Environment(\.colorScheme) private var colorScheme
     @State private var urlPreview: URLPreview?
     @State private var isLoadingPreview = false
     @State private var isHovering = false
@@ -400,7 +430,7 @@ struct MessageRowView: View {
                     Text(message.sender)
                         .font(.callout)
                         .fontWeight(.semibold)
-                        .foregroundStyle(NicknameColorizer.color(for: message.sender))
+                        .foregroundStyle(NicknameColorizer.color(for: message.sender, colorScheme: colorScheme))
                 }
                 
                 // Message text (Secondary color for body)

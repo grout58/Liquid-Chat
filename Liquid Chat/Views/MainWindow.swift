@@ -74,6 +74,18 @@ struct MainWindow: View {
             ChannelJoinView(server: server, chatState: chatState)
                 .themedStyle(settings)
         }
+        .alert(item: $chatState.connectionAlert) { alert in
+            Alert(
+                title: Text("Connection Failed"),
+                message: Text("\(alert.server.config.hostname): \(alert.message)\n\nReconnecting automatically…"),
+                primaryButton: .default(Text("Retry Now")) {
+                    chatState.connectToServer(alert.server)
+                },
+                secondaryButton: .cancel(Text("Stop Retrying")) {
+                    chatState.disconnectFromServer(alert.server)
+                }
+            )
+        }
         .task {
             // Load saved servers on app launch
             guard !hasLoadedSavedServers else { return }

@@ -16,6 +16,9 @@ struct ChatView: View {
     @State private var messageHistory: [String] = []
     @State private var historyIndex = -1
     @State private var showPastebinAlert = false
+    @State private var isUploadingPastebin = false
+    @State private var pastebinError: String?
+    @State private var showPastebinError = false
     @Namespace private var glassNamespace
     
     // AI Summarization
@@ -152,12 +155,20 @@ struct ChatView: View {
             ChannelListView(server: server, chatState: chatState)
         }
         .alert("Large Message", isPresented: $showPastebinAlert) {
+            Button("Upload to Pastebin") {
+                uploadToPastebin()
+            }
             Button("Send Anyway") {
                 performSend()
             }
             Button("Cancel", role: .cancel) { }
         } message: {
-            Text("This message contains \(messageText.components(separatedBy: .newlines).count) lines. Consider using a pastebin service for large blocks of text.")
+            Text("This message contains \(messageText.components(separatedBy: .newlines).count) lines. Upload to paste.rs and send the link instead?")
+        }
+        .alert("Pastebin Upload Failed", isPresented: $showPastebinError, presenting: pastebinError) { _ in
+            Button("OK", role: .cancel) { }
+        } message: { error in
+            Text(error)
         }
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
@@ -380,16 +391,33 @@ struct ChatView: View {
             messageHistory.removeFirst()
         }
         historyIndex = -1
-        
+
         // Check if it's a command
         let isCommand = commandHandler.handleInput(messageText, in: channel)
-        
+
         // If not a command, send as regular message
         if !isCommand {
             chatState.sendMessage(messageText, to: channel)
         }
-        
+
         messageText = ""
+    }
+
+    private func uploadToPastebin() {
+        let textToUpload = messageText
+        isUploadingPastebin = true
+        Task {
+            do {
+                let url = try await PastebinUploader.shared.upload(textToUpload)
+                messageText = url
+                isUploadingPastebin = false
+                performSend()
+            } catch {
+                isUploadingPastebin = false
+                pastebinError = error.localizedDescription
+                showPastebinError = true
+            }
+        }
     }
     
     private func generateSummary() {

@@ -18,7 +18,7 @@ struct URLPreview: Identifiable {
     let siteName: String?
     
     var isImage: Bool {
-        guard let pathExtension = url.pathExtension.lowercased() as String? else { return false }
+        let pathExtension = url.pathExtension.lowercased()
         return ["jpg", "jpeg", "png", "gif", "webp", "bmp"].contains(pathExtension)
     }
 }
@@ -26,30 +26,22 @@ struct URLPreview: Identifiable {
 /// Actor-based URL preview fetcher for safe concurrent access
 actor URLPreviewFetcher {
     static let shared = URLPreviewFetcher()
-    
-    // Cache to avoid re-fetching the same URLs
+
+    // Cache to avoid re-fetching the same URLs. Capped at 200 entries (LRU eviction).
     private var cache: [URL: URLPreview] = [:]
-    
-    // Cached regex patterns for HTML parsing (improves performance)
-    private static let cachedRegexPatterns: [String: NSRegularExpression] = {
-        var patterns: [String: NSRegularExpression] = [:]
-        
-        // Common HTML meta tag patterns
-        let metaPatterns = [
-            "title": "<title>([^<]+)</title>",
-            "meta_property": "<meta\\s+property=\"([^\"]+)\"\\s+content=\"([^\"]+)\"",
-            "meta_name": "<meta\\s+name=\"([^\"]+)\"\\s+content=\"([^\"]+)\""
-        ]
-        
-        for (key, pattern) in metaPatterns {
-            if let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) {
-                patterns[key] = regex
-            }
-        }
-        
-        return patterns
+    private var cacheOrder: [URL] = []
+    private let maxCacheSize = 200
+
+    // Compiled regex cache keyed by pattern string, to avoid recompilation on every call.
+    private var regexCache: [String: NSRegularExpression] = [:]
+
+    private static let urlSession: URLSession = {
+        let config = URLSessionConfiguration.default
+        config.timeoutIntervalForRequest = 10
+        config.timeoutIntervalForResource = 15
+        return URLSession(configuration: config)
     }()
-    
+
     private init() {}
     
     /// Fetch preview data for a URL
@@ -58,7 +50,7 @@ actor URLPreviewFetcher {
         if let cached = cache[url] {
             return cached
         }
-        
+
         // If it's a direct image URL, return basic preview
         if isImageURL(url) {
             let preview = URLPreview(
@@ -68,20 +60,20 @@ actor URLPreviewFetcher {
                 imageURL: url,
                 siteName: url.host
             )
-            cache[url] = preview
+            store(preview, for: url)
             return preview
         }
-        
+
         // Fetch HTML and parse metadata
         do {
-            let (data, _) = try await URLSession.shared.data(from: url)
+            let (data, _) = try await Self.urlSession.data(from: url)
             
             guard let html = String(data: data, encoding: .utf8) else {
                 return nil
             }
             
             let preview = parseHTMLMetadata(html: html, url: url)
-            cache[url] = preview
+            store(preview, for: url)
             return preview
             
         } catch {
@@ -90,6 +82,20 @@ actor URLPreviewFetcher {
         }
     }
     
+    /// Store a preview in the cache, evicting the oldest entry if over the limit.
+    private func store(_ preview: URLPreview?, for url: URL) {
+        if let preview {
+            if cache[url] == nil {
+                cacheOrder.append(url)
+                if cacheOrder.count > maxCacheSize {
+                    let evict = cacheOrder.removeFirst()
+                    cache.removeValue(forKey: evict)
+                }
+            }
+            cache[url] = preview
+        }
+    }
+
     private func isImageURL(_ url: URL) -> Bool {
         let imageExtensions = ["jpg", "jpeg", "png", "gif", "webp", "bmp"]
         return imageExtensions.contains(url.pathExtension.lowercased())
@@ -168,15 +174,17 @@ actor URLPreviewFetcher {
         return extractPattern(pattern, from: html)
     }
     
-    /// Extracts content using a regex pattern (with compiled pattern caching)
-    /// - Parameters:
-    ///   - pattern: The regex pattern to match
-    ///   - html: The HTML string to search
-    /// - Returns: The extracted content with HTML entities decoded
+    /// Extracts content using a regex pattern, caching compiled expressions.
     private func extractPattern(_ pattern: String, from html: String) -> String? {
-        // Try to compile regex (this should be fast due to simplicity)
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
-            return nil
+        let regex: NSRegularExpression
+        if let cached = regexCache[pattern] {
+            regex = cached
+        } else {
+            guard let compiled = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
+                return nil
+            }
+            regexCache[pattern] = compiled
+            regex = compiled
         }
         
         let range = NSRange(html.startIndex..., in: html)

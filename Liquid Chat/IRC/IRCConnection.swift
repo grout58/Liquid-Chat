@@ -177,6 +177,8 @@ class IRCConnection {
     
     /// Disconnect from the IRC server
     func disconnect(message: String = "Leaving") {
+        capNegotiationTimer?.cancel()
+        capNegotiationTimer = nil
         send(command: "QUIT", parameters: [message])
         connection?.cancel()
         connection = nil
@@ -188,20 +190,27 @@ class IRCConnection {
     private func setupConnectionHandlers() {
         connection?.stateUpdateHandler = { [weak self] newState in
             guard let self = self else { return }
-            
+
             log("Connection state changed: \(newState)", level: .debug)
-            
+
             switch newState {
             case .ready:
-                self.handleConnectionReady()
+                // handleConnectionReady also mutates state — dispatch to main
+                DispatchQueue.main.async { [weak self] in self?.handleConnectionReady() }
             case .failed(let error):
                 log("Connection failed: \(error.localizedDescription)", level: .error)
-                self.state = .error(error.localizedDescription)
-                self.delegate?.connectionDidFail(self, error: error)
+                DispatchQueue.main.async { [weak self] in
+                    guard let self else { return }
+                    self.state = .error(error.localizedDescription)
+                    self.delegate?.connectionDidFail(self, error: error)
+                }
             case .cancelled:
                 log("Connection cancelled", level: .info)
-                self.state = .disconnected
-                self.delegate?.connectionDidDisconnect(self)
+                DispatchQueue.main.async { [weak self] in
+                    guard let self else { return }
+                    self.state = .disconnected
+                    self.delegate?.connectionDidDisconnect(self)
+                }
             case .waiting(let error):
                 log("Connection waiting: \(error.localizedDescription)", level: .warning)
             case .preparing:
@@ -214,10 +223,10 @@ class IRCConnection {
         receiveMessages()
     }
     
-    /// Handle successful TCP connection - begin IRC handshake
+    /// Handle successful TCP connection - begin IRC handshake (must run on main thread)
     private func handleConnectionReady() {
         log("Connection ready to \(config.hostname):\(config.port)", level: .info)
-        state = .connected
+        state = .connected          // Safe: now always called on main thread
         delegate?.connectionDidConnect(self)
         performIRCHandshake()
     }
@@ -389,9 +398,14 @@ class IRCConnection {
             
         case "001": // RPL_WELCOME
             log("✓ Registered successfully", level: .info)
-            state = .registered
-            serverName = parsed.prefix
-            delegate?.connectionDidRegister(self)
+            let prefix = parsed.prefix
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.state = .registered
+                self.serverName = prefix
+                self.delegate?.connectionDidRegister(self)
+            }
+            return  // Delegate call moved to main thread above
             
         case "433": // ERR_NICKNAMEINUSE
             log("Nickname in use, trying alternate", level: .warning)
@@ -543,8 +557,9 @@ class IRCConnection {
             if let authData = authString.data(using: .utf8) {
                 let base64 = authData.base64EncodedString()
                 
-                // Split into 400-byte chunks if needed (IRC line limit)
-                if base64.count <= 400 {
+                // Split into 400-byte chunks if needed (IRC line limit).
+                // A payload of exactly 400 bytes must be followed by "+" to signal end-of-stream.
+                if base64.count < 400 {
                     send(command: "AUTHENTICATE", parameters: [base64])
                 } else {
                     // Handle chunked SASL (rarely needed)

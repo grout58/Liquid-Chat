@@ -132,7 +132,7 @@ class SmartReplyGenerator {
         
         // Configure generation options for quick, focused responses
         var options = GenerationOptions()
-        options.temperature = 0.4 // Lower temperature for more focused replies
+        options.temperature = AppSettings.shared.aiTemperature
         
         // Generate structured suggestions
         let response: [AISmartReply]
