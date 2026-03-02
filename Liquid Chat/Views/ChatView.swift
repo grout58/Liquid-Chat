@@ -678,12 +678,8 @@ struct MessageInputView: View {
         // Replace the current word with the match
         messageText.removeSubrange(wordStart..<cursorPosition)
         
-        // Add colon if at the start of the message
-        if wordStart == messageText.startIndex {
-            messageText.insert(contentsOf: "\(match): ", at: wordStart)
-        } else {
-            messageText.insert(contentsOf: match, at: wordStart)
-        }
+        // Always append colon when tab-completing a nickname (IRC addressing convention)
+        messageText.insert(contentsOf: "\(match): ", at: wordStart)
         
         lastTabCompletionWord = match
     }
@@ -764,7 +760,24 @@ struct UserRowView: View {
             }
             
             Divider()
-            
+
+            // Ignore / Unignore
+            if AppSettings.shared.isIgnored(user.nickname) {
+                Button {
+                    AppSettings.shared.unignore(user.nickname)
+                } label: {
+                    Label("Unignore", systemImage: "eye")
+                }
+            } else {
+                Button(role: .destructive) {
+                    AppSettings.shared.ignore(user.nickname)
+                } label: {
+                    Label("Ignore", systemImage: "eye.slash")
+                }
+            }
+
+            Divider()
+
             // Moderation (if you're an op)
             if let connection = channel.server.connection,
                channel.users.first(where: { $0.nickname == connection.currentNickname })?.modes.contains("o") == true {

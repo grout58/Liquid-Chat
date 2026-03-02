@@ -93,6 +93,23 @@ struct IRCServerConfig: Codable, Identifiable, Equatable, Hashable {
     var displayName: String {
         savedName ?? "\(nickname)@\(hostname)"
     }
+
+    /// Return a copy with a different password (used by Keychain migration).
+    func withPassword(_ newPassword: String?) -> IRCServerConfig {
+        IRCServerConfig(
+            id: id,
+            hostname: hostname,
+            port: port,
+            useSSL: useSSL,
+            nickname: nickname,
+            username: username,
+            realname: realname,
+            password: newPassword,
+            authMethod: authMethod,
+            autoConnect: autoConnect,
+            savedName: savedName
+        )
+    }
 }
 
 /// Main IRC connection class using Network.framework

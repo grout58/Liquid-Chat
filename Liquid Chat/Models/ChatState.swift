@@ -7,6 +7,7 @@
 
 import Foundation
 import SwiftUI
+import UserNotifications
 
 @MainActor
 @Observable
@@ -15,8 +16,10 @@ class ChatState: IRCConnectionDelegate {
     /// Note: Made public for preview/testing purposes - in production use addServer()
     var servers: [IRCServer] = []
     
-    /// Currently selected channel for display
-    var selectedChannel: IRCChannel?
+    /// Currently selected channel for display. Marks the newly selected channel as read.
+    var selectedChannel: IRCChannel? {
+        didSet { selectedChannel?.markRead() }
+    }
     
     /// Server for which to show the channel join dialog
     var showingChannelJoinForServer: IRCServer?
@@ -168,14 +171,33 @@ class ChatState: IRCConnectionDelegate {
     func sendMessage(_ text: String, to channel: IRCChannel) {
         guard let connection = channel.server.connection else { return }
         connection.sendMessage(text, to: channel.name)
-        
-        // Add message to local history
+
+        // Add message to local history (own messages never count as unread)
         let message = IRCChatMessage(
             sender: connection.currentNickname,
             content: text,
             type: .message
         )
-        channel.appendMessage(message)
+        channel.appendMessage(message, isActive: true)
+    }
+
+    /// Mark a channel as read and clear its unread/mention state.
+    func markRead(_ channel: IRCChannel) {
+        channel.markRead()
+    }
+
+    /// Post a local notification if the user has granted permission.
+    private func sendNotification(title: String, body: String, identifier: String) {
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.body = body
+        content.sound = AppSettings.shared.enableSoundNotifications ? .default : nil
+        let request = UNNotificationRequest(
+            identifier: identifier,
+            content: content,
+            trigger: nil
+        )
+        UNUserNotificationCenter.current().add(request)
     }
     
     // MARK: - IRCConnectionDelegate
@@ -189,6 +211,11 @@ class ChatState: IRCConnectionDelegate {
     nonisolated func connectionDidRegister(_ connection: IRCConnection) {
         Task {
             await ConsoleLogger.shared.log("Registered on \(connection.config.hostname)", level: .info, category: "Connection")
+        }
+        // Request notification permission once after first successful registration
+        Task {
+            try? await UNUserNotificationCenter.current()
+                .requestAuthorization(options: [.alert, .sound, .badge])
         }
         
         // Mark server as connected - dispatch to MainActor without blocking
@@ -354,6 +381,15 @@ class ChatState: IRCConnectionDelegate {
     private func handlePrivMsg(_ message: IRCMessage, server: IRCServer) {
         guard message.parameters.count >= 2,
               let sender = message.nick else { return }
+
+        // Drop messages from ignored users
+        guard !AppSettings.shared.isIgnored(sender) else { return }
+
+        // Route ZNC pseudo-server messages (*status, *playback, etc.) to a dedicated console channel
+        if sender.hasPrefix("*") {
+            handleZNCStatus(message: text, from: sender, server: server)
+            return
+        }
         
         let target = message.parameters[0]
         let text = message.parameters[1]
@@ -378,8 +414,31 @@ class ChatState: IRCConnectionDelegate {
         // Use server timestamp if available (IRCv3 server-time capability)
         let timestamp = message.serverTime ?? Date()
         let chatMessage = IRCChatMessage(sender: sender, content: text, type: .message, timestamp: timestamp, batchID: message.batchID)
-        channel.appendMessage(chatMessage)
-        
+
+        let currentNick = server.connection?.currentNickname
+        let isActive = channel === selectedChannel
+        channel.appendMessage(chatMessage, currentNickname: currentNick, isActive: isActive)
+
+        // Fire desktop notifications for mentions and DMs
+        let textLower = text.lowercased()
+        let isMention = currentNick.map { textLower.contains($0.lowercased()) } ?? false
+
+        if !isActive {
+            if !isChannelMessage && AppSettings.shared.enablePrivateMessageNotifications {
+                sendNotification(
+                    title: "Message from \(sender)",
+                    body: text,
+                    identifier: "dm-\(sender)-\(timestamp.timeIntervalSince1970)"
+                )
+            } else if isMention && AppSettings.shared.enableMentionNotifications {
+                sendNotification(
+                    title: "\(sender) mentioned you in \(channelName)",
+                    body: text,
+                    identifier: "mention-\(sender)-\(timestamp.timeIntervalSince1970)"
+                )
+            }
+        }
+
         // Log message to disk
         Task {
             await ChannelLogger.shared.log(
@@ -393,6 +452,7 @@ class ChatState: IRCConnectionDelegate {
     private func handleJoin(_ message: IRCMessage, server: IRCServer) {
         guard message.parameters.count >= 1,
               let nick = message.nick else { return }
+        guard !AppSettings.shared.isIgnored(nick) else { return }
         
         let channelName = message.parameters[0]
         
@@ -505,6 +565,27 @@ class ChatState: IRCConnectionDelegate {
         }
     }
     
+    // MARK: - ZNC Bouncer Handling
+
+    /// Route messages from ZNC pseudo-users (*status, *playback, etc.) to a server console channel.
+    private func handleZNCStatus(message text: String, from sender: String, server: IRCServer) {
+        let consoleName = sender  // e.g. "*status" or "*playback"
+
+        let channel: IRCChannel
+        if let existing = server.channels.first(where: { $0.name == consoleName }) {
+            channel = existing
+        } else {
+            let newChannel = IRCChannel(name: consoleName, server: server)
+            server.channels.append(newChannel)
+            channel = newChannel
+        }
+
+        let msg = IRCChatMessage(sender: sender, content: text, type: .system)
+        channel.appendMessage(msg, isActive: channel === selectedChannel)
+
+        Task { await ConsoleLogger.shared.log("ZNC \(sender): \(text)", level: .info, category: "ZNC") }
+    }
+
     // MARK: - Channel List Handling
     
     private func handleListStart(_ message: IRCMessage, server: IRCServer) {

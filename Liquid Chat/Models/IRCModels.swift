@@ -164,20 +164,43 @@ class IRCChannel: Identifiable, Hashable {
     /// Users array
     var users: [IRCUser] = []
 
-    /// Append a message, trimming the oldest entries if the user-configured limit is exceeded.
-    func appendMessage(_ message: IRCChatMessage) {
+    /// Append a message, trimming oldest entries beyond the limit.
+    /// Pass `currentNickname` to enable unread/mention tracking.
+    func appendMessage(_ message: IRCChatMessage, currentNickname: String? = nil, isActive: Bool = false) {
         messages.append(message)
         let limit = AppSettings.shared.messageHistoryLimit
         if messages.count > limit {
             messages.removeFirst(messages.count - limit)
         }
+
+        guard !isActive, message.type == .message || message.type == .action || message.type == .notice else { return }
+        unreadCount += 1
+
+        if let nick = currentNickname {
+            let text = String(message.content.characters).lowercased()
+            if text.contains(nick.lowercased()) {
+                hasMention = true
+            }
+        }
     }
     
     var isJoined: Bool = false
-    
+
+    /// Number of messages received while this channel was not selected.
+    var unreadCount: Int = 0
+
+    /// True when an unread message contains a mention of the current user's nick.
+    var hasMention: Bool = false
+
     /// Is this a private message (DM) rather than a channel?
     var isPrivateMessage: Bool {
         !name.hasPrefix("#") && !name.hasPrefix("&")
+    }
+
+    /// Clear unread state (call when the user switches to this channel).
+    func markRead() {
+        unreadCount = 0
+        hasMention = false
     }
     
     init(name: String, server: IRCServer) {

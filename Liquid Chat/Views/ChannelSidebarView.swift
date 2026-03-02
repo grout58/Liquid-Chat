@@ -304,13 +304,13 @@ struct ChannelRowView: View {
             
             Spacer()
             
-            if !channel.messages.isEmpty {
-                Text("\(channel.messages.count)")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
+            if channel.unreadCount > 0 {
+                Text("\(channel.unreadCount)")
+                    .font(.caption2.bold())
+                    .foregroundStyle(channel.hasMention ? .white : .secondary)
                     .padding(.horizontal, 6)
                     .padding(.vertical, 2)
-                    .background(.quaternary)
+                    .background(channel.hasMention ? Color.accentColor : Color.secondary.opacity(0.25))
                     .clipShape(Capsule())
             }
         }

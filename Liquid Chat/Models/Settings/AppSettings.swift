@@ -132,6 +132,19 @@ class AppSettings {
         }
     }
     
+    // MARK: - Ignore List
+
+    /// Nicknames whose messages are hidden across all servers.
+    var ignoredNicknames: Set<String> {
+        didSet {
+            UserDefaults.standard.set(Array(ignoredNicknames), forKey: "ignoredNicknames")
+        }
+    }
+
+    func ignore(_ nickname: String) { ignoredNicknames.insert(nickname.lowercased()) }
+    func unignore(_ nickname: String) { ignoredNicknames.remove(nickname.lowercased()) }
+    func isIgnored(_ nickname: String) -> Bool { ignoredNicknames.contains(nickname.lowercased()) }
+
     // MARK: - Advanced Settings
     
     /// Enable console logging
@@ -185,6 +198,9 @@ class AppSettings {
         self.messageHistoryLimit = UserDefaults.standard.integer(forKey: "messageHistoryLimit") != 0
             ? UserDefaults.standard.integer(forKey: "messageHistoryLimit") : 1000
         
+        let ignoredArray = UserDefaults.standard.stringArray(forKey: "ignoredNicknames") ?? []
+        self.ignoredNicknames = Set(ignoredArray)
+
         self.enableSoundNotifications = UserDefaults.standard.object(forKey: "enableSoundNotifications") as? Bool ?? true
         self.enableMentionNotifications = UserDefaults.standard.object(forKey: "enableMentionNotifications") as? Bool ?? true
         self.enablePrivateMessageNotifications = UserDefaults.standard.object(forKey: "enablePrivateMessageNotifications") as? Bool ?? true
@@ -219,6 +235,7 @@ class AppSettings {
         enableNicknameColors = true
         messageHistoryLimit = 1000
         
+        ignoredNicknames = []
         enableSoundNotifications = true
         enableMentionNotifications = true
         enablePrivateMessageNotifications = true
