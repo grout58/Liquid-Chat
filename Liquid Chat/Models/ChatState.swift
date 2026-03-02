@@ -385,14 +385,14 @@ class ChatState: IRCConnectionDelegate {
         // Drop messages from ignored users
         guard !AppSettings.shared.isIgnored(sender) else { return }
 
+        let target = message.parameters[0]
+        let text = message.parameters[1]
+
         // Route ZNC pseudo-server messages (*status, *playback, etc.) to a dedicated console channel
         if sender.hasPrefix("*") {
             handleZNCStatus(message: text, from: sender, server: server)
             return
         }
-        
-        let target = message.parameters[0]
-        let text = message.parameters[1]
         
         // Determine if this is a channel message or private message
         let isChannelMessage = target.hasPrefix("#") || target.hasPrefix("&")

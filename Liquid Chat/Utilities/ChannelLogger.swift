@@ -18,8 +18,6 @@ actor ChannelLogger {
     // Keep track of open file handles for better performance
     private var fileHandles: [String: FileHandle] = [:]
     private var lastAccessTime: [String: Date] = [:]
-    // Singleton lives for the app lifetime; task is stored for reference only.
-    private var cleanupTask: Task<Void, Never>?
     
     private init() {
         // Setup base directory: ~/Library/Application Support/Liquid Chat/Logs
@@ -42,9 +40,8 @@ actor ChannelLogger {
             await ConsoleLogger.shared.log("Channel logger initialized at \(baseURL.path)", level: .info, category: "Logger")
         }
         
-        // Start periodic cleanup task in detached context to respect actor isolation
-        // Using nonisolated(unsafe) is safe here because Task is created once and only cancelled in deinit
-        cleanupTask = Task {
+        // Start periodic cleanup task (fire-and-forget; singleton lives for app lifetime)
+        Task {
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(300)) // Every 5 minutes
                 await ChannelLogger.shared.cleanupInactiveHandles()
