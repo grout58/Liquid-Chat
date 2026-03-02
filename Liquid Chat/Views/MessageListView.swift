@@ -12,6 +12,7 @@ struct MessageListView: View {
     let channel: IRCChannel
     @Binding var scrollToMessageIndex: Int?
     @Binding var highlightedMessageIndex: Int?
+    var searchText: String? = nil
     
     @State private var scrollPosition: UUID?
     @State private var expandedStatusGroups: Set<UUID> = []
@@ -35,7 +36,7 @@ struct MessageListView: View {
                     return group.id
                 }
             case .statusGroup(let messages):
-                if let foundMessage = messages.first(where: { msg in
+                if messages.contains(where: { msg in
                     if let msgIndex = channel.messages.firstIndex(where: { $0.id == msg.id }) {
                         return msgIndex == index
                     }
@@ -59,6 +60,7 @@ struct MessageListView: View {
                             messageIndex: getMessageIndex(for: group),
                             isHighlighted: isGroupHighlighted(group),
                             isExpanded: expandedStatusGroups.contains(group.id),
+                            searchText: searchText,
                             onToggleExpand: {
                                 if expandedStatusGroups.contains(group.id) {
                                     expandedStatusGroups.remove(group.id)
@@ -203,18 +205,21 @@ struct MessageGroupView: View {
     let messageIndex: Int?
     let isHighlighted: Bool
     let isExpanded: Bool
+    var searchText: String? = nil
     let onToggleExpand: () -> Void
     
     var body: some View {
         Group {
             switch group {
             case .regular(let message, let isGrouped):
-                MessageRowView(message: message, isGrouped: isGrouped, channel: channel)
+                MessageRowView(message: message, isGrouped: isGrouped, channel: channel, searchText: searchText)
                 
             case .statusGroup(let messages):
                 StatusGroupView(
                     messages: messages,
                     isExpanded: isExpanded,
+                    channel: channel,
+                    searchText: searchText,
                     onToggle: onToggleExpand
                 )
             }
@@ -234,6 +239,8 @@ struct MessageGroupView: View {
 struct StatusGroupView: View {
     let messages: [IRCChatMessage]
     let isExpanded: Bool
+    let channel: IRCChannel
+    var searchText: String? = nil
     let onToggle: () -> Void
     @Environment(\.themeColors) private var themeColors
     
@@ -257,7 +264,7 @@ struct StatusGroupView: View {
             if isExpanded {
                 // Show all status messages
                 ForEach(messages) { message in
-                    StatusMessageRow(message: message)
+                    StatusMessageRow(message: message, channel: channel, searchText: searchText)
                 }
             } else {
                 // Show collapsed summary
@@ -292,6 +299,8 @@ struct StatusGroupView: View {
 
 struct StatusMessageRow: View {
     let message: IRCChatMessage
+    let channel: IRCChannel
+    var searchText: String? = nil
     @Environment(\.themeColors) private var themeColors
     
     private var icon: String {
@@ -334,6 +343,7 @@ struct MessageRowView: View {
     let message: IRCChatMessage
     let isGrouped: Bool
     let channel: IRCChannel
+    var searchText: String? = nil
     
     @Environment(\.themeColors) private var themeColors
     @State private var urlPreview: URLPreview?
@@ -396,7 +406,8 @@ struct MessageRowView: View {
                 // Message text (Secondary color for body)
                 HighPerformanceTextView(
                     content: message.content,
-                    baseColor: themeColors.text
+                    baseColor: themeColors.text,
+                    searchText: searchText
                 )
                 .textSelection(.enabled)
                 
@@ -457,15 +468,17 @@ struct MessageRowView: View {
 struct HighPerformanceTextView: View {
     let content: AttributedString
     let baseColor: Color
+    var searchText: String? = nil
     
     // PERFORMANCE: Static URL detector cached across all instances
     private static let urlDetector = try? NSDataDetector(
         types: NSTextCheckingResult.CheckingType.link.rawValue
     )
     
-    init(content: AttributedString, baseColor: Color = .primary) {
+    init(content: AttributedString, baseColor: Color = .primary, searchText: String? = nil) {
         self.content = content
         self.baseColor = baseColor
+        self.searchText = searchText
     }
     
     var processedContent: AttributedString {
@@ -476,8 +489,25 @@ struct HighPerformanceTextView: View {
             attributed[range].foregroundColor = baseColor
         }
         
-        // Detect and linkify URLs using cached detector
         let text = String(attributed.characters)
+        
+        // Highlight search matches
+        if let searchTerm = searchText, !searchTerm.isEmpty {
+            let searchLower = searchTerm.lowercased()
+            let textLower = text.lowercased()
+            
+            var startIndex = textLower.startIndex
+            while let range = textLower.range(of: searchLower, range: startIndex..<textLower.endIndex) {
+                // Convert to attributed string range
+                if let attrRange = attributed.range(of: String(text[range])) {
+                    attributed[attrRange].backgroundColor = Color.yellow.opacity(0.4)
+                    attributed[attrRange].foregroundColor = Color.black
+                }
+                startIndex = range.upperBound
+            }
+        }
+        
+        // Detect and linkify URLs using cached detector
         let matches = Self.urlDetector?.matches(
             in: text,
             range: NSRange(text.startIndex..., in: text)

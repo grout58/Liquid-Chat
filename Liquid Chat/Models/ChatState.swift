@@ -115,11 +115,17 @@ class ChatState: IRCConnectionDelegate {
     func joinChannel(name: String, on server: IRCServer) {
         guard let connection = server.connection else { return }
         
-        // Create channel if it doesn't exist
-        if !server.channels.contains(where: { $0.name == name }) {
-            let channel = IRCChannel(name: name, server: server)
+        // Create channel if it doesn't exist, or get existing one
+        let channel: IRCChannel
+        if let existing = server.channels.first(where: { $0.name == name }) {
+            channel = existing
+        } else {
+            channel = IRCChannel(name: name, server: server)
             server.channels.append(channel)
         }
+        
+        // Switch to the channel immediately
+        selectedChannel = channel
         
         connection.join(channel: name)
     }
@@ -168,47 +174,68 @@ class ChatState: IRCConnectionDelegate {
     
     // MARK: - IRCConnectionDelegate
     
-    func connectionDidConnect(_ connection: IRCConnection) {
-        ConsoleLogger.shared.log("Connected to \(connection.config.hostname)", level: .info, category: "Connection")
+    nonisolated func connectionDidConnect(_ connection: IRCConnection) {
+        Task {
+            await ConsoleLogger.shared.log("Connected to \(connection.config.hostname)", level: .info, category: "Connection")
+        }
     }
     
-    func connectionDidRegister(_ connection: IRCConnection) {
-        ConsoleLogger.shared.log("Registered on \(connection.config.hostname)", level: .info, category: "Connection")
+    nonisolated func connectionDidRegister(_ connection: IRCConnection) {
+        Task {
+            await ConsoleLogger.shared.log("Registered on \(connection.config.hostname)", level: .info, category: "Connection")
+        }
         
-        // Mark server as connected
-        if let server = servers.first(where: { $0.connection === connection }) {
-            server.isConnected = true
-            
-            // Show channel join dialog
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                self.showingChannelJoinForServer = server
+        // Mark server as connected - dispatch to MainActor without blocking
+        Task { @MainActor in
+            if let server = servers.first(where: { $0.connection === connection }) {
+                server.isConnected = true
+                
+                // Show channel join dialog after a delay
+                Task {
+                    try? await Task.sleep(for: .milliseconds(500))
+                    showingChannelJoinForServer = server
+                }
             }
         }
     }
     
-    func connectionDidDisconnect(_ connection: IRCConnection) {
-        ConsoleLogger.shared.log("Disconnected from \(connection.config.hostname)", level: .warning, category: "Connection")
+    nonisolated func connectionDidDisconnect(_ connection: IRCConnection) {
+        Task {
+            await ConsoleLogger.shared.log("Disconnected from \(connection.config.hostname)", level: .warning, category: "Connection")
+        }
         
-        if let server = servers.first(where: { $0.connection === connection }) {
-            server.isConnected = false
-            server.connectionState = .disconnected
+        Task { @MainActor in
+            if let server = servers.first(where: { $0.connection === connection }) {
+                server.isConnected = false
+                server.connectionState = .disconnected
+            }
         }
     }
     
-    func connectionDidFail(_ connection: IRCConnection, error: Error) {
-        ConsoleLogger.shared.log("Connection failed: \(error.localizedDescription)", level: .error, category: "Connection")
+    nonisolated func connectionDidFail(_ connection: IRCConnection, error: Error) {
+        Task {
+            await ConsoleLogger.shared.log("Connection failed: \(error.localizedDescription)", level: .error, category: "Connection")
+        }
         
-        if let server = servers.first(where: { $0.connection === connection }) {
-            server.connectionState = .error(error.localizedDescription)
+        Task { @MainActor in
+            if let server = servers.first(where: { $0.connection === connection }) {
+                server.connectionState = .error(error.localizedDescription)
+            }
         }
     }
     
-    func connection(_ connection: IRCConnection, didReceiveMessage message: IRCMessage) {
-        handleIRCMessage(message, from: connection)
+    nonisolated func connection(_ connection: IRCConnection, didReceiveMessage message: IRCMessage) {
+        // CRITICAL: This is called from IRC background thread
+        // Use Task to dispatch to MainActor WITHOUT blocking the IRC thread
+        Task { @MainActor in
+            handleIRCMessage(message, from: connection)
+        }
     }
     
-    func connection(_ connection: IRCConnection, didEncounterError error: Error) {
-        ConsoleLogger.shared.log("Connection error: \(error.localizedDescription)", level: .error, category: "Connection")
+    nonisolated func connection(_ connection: IRCConnection, didEncounterError error: Error) {
+        Task {
+            await ConsoleLogger.shared.log("Connection error: \(error.localizedDescription)", level: .error, category: "Connection")
+        }
     }
     
     // MARK: - Message Handling
@@ -396,14 +423,14 @@ class ChatState: IRCConnectionDelegate {
     
     private func handleNamesReply(_ message: IRCMessage, server: IRCServer) {
         guard message.parameters.count >= 4 else { 
-            ConsoleLogger.shared.log("NAMES: Invalid parameters count: \(message.parameters.count)", level: .error, category: "IRC")
+            Task { await ConsoleLogger.shared.log("NAMES: Invalid parameters count: \(message.parameters.count)", level: .error, category: "IRC") }
             return 
         }
         
         let channelName = message.parameters[2]
         let names = message.parameters[3].split(separator: " ").map(String.init)
         
-        ConsoleLogger.shared.log("NAMES for \(channelName): \(names.count) users", level: .info, category: "IRC")
+        Task { await ConsoleLogger.shared.log("NAMES for \(channelName): \(names.count) users", level: .info, category: "IRC") }
         
         if let channel = server.channels.first(where: { $0.name == channelName }) {
             for name in names {
@@ -421,9 +448,9 @@ class ChatState: IRCConnectionDelegate {
                     channel.users.append(user)
                 }
             }
-            ConsoleLogger.shared.log("Total users in \(channelName): \(channel.users.count)", level: .debug, category: "IRC")
+            Task { await ConsoleLogger.shared.log("Total users in \(channelName): \(channel.users.count)", level: .debug, category: "IRC") }
         } else {
-            ConsoleLogger.shared.log("Channel \(channelName) not found in server channels", level: .warning, category: "IRC")
+            Task { await ConsoleLogger.shared.log("Channel \(channelName) not found in server channels", level: .warning, category: "IRC") }
         }
     }
     
@@ -433,6 +460,15 @@ class ChatState: IRCConnectionDelegate {
         // Clear previous list and start loading
         server.availableChannels.removeAll()
         server.isLoadingChannelList = true
+        Task { await ConsoleLogger.shared.log("LIST START - loading channels...", level: .info, category: "IRC") }
+        
+        // Show the channel list dialog now that server has responded
+        // (prevents opening empty dialog before data arrives)
+        Task { @MainActor in
+            if showingChannelListForServer == nil {
+                showingChannelListForServer = server
+            }
+        }
     }
     
     private func handleList(_ message: IRCMessage, server: IRCServer) {
@@ -449,18 +485,21 @@ class ChatState: IRCConnectionDelegate {
             topic: topic
         )
         
-        // Use batched updates to prevent UI freeze with thousands of channels
+        // Buffer without logging - prevents MainActor saturation
         server.bufferChannelListEntry(entry)
     }
     
     private func handleListEnd(_ message: IRCMessage, server: IRCServer) {
-        // Flush any remaining buffered entries
-        server.flushChannelListBuffer()
+        Task { await ConsoleLogger.shared.log("LIST END received", level: .info, category: "IRC") }
         
-        server.isLoadingChannelList = false
-        
-        // Sort channels by user count (most popular first)
-        server.availableChannels.sort { $0.userCount > $1.userCount }
+        // Flush and sort in single operation (sorting happens in actor)
+        Task.detached {
+            await server.flushChannelListBuffer()
+            
+            await MainActor.run {
+                server.isLoadingChannelList = false
+            }
+        }
     }
     
     // MARK: - Additional IRC Protocol Handlers (Apple Compliance)

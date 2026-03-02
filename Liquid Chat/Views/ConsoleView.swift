@@ -41,21 +41,31 @@ struct ConsoleLogEntry: Identifiable {
     }
 }
 
-/// Global console logger
-@Observable
-class ConsoleLogger {
+/// Global console logger - uses actor for thread-safe access from any thread
+actor ConsoleLogger {
     static let shared = ConsoleLogger()
     
-    var entries: [ConsoleLogEntry] = []
-    private let maxEntries = Logging.maxConsoleEntries
+    private var _entries: [ConsoleLogEntry] = []
+    private let maxEntries = 1000  // Fixed value to avoid MainActor isolation issues
     
     private init() {}
+    
+    /// Get current entries (async because it's actor-isolated)
+    func getEntries() -> [ConsoleLogEntry] {
+        return _entries
+    }
+    
+    /// Get entry count (lightweight, doesn't copy array)
+    func getCount() -> Int {
+        return _entries.count
+    }
     
     /// Logs a message to the console with the specified level and category
     /// - Parameters:
     ///   - message: The message to log
     ///   - level: The log level (debug, info, warning, error)
     ///   - category: The category for grouping related messages
+    /// - Note: This is actor-isolated, safe to call from any thread
     func log(_ message: String, level: ConsoleLogEntry.LogLevel = .info, category: String = "General") {
         let entry = ConsoleLogEntry(
             timestamp: Date(),
@@ -64,11 +74,11 @@ class ConsoleLogger {
             message: message
         )
         
-        entries.append(entry)
+        _entries.append(entry)
         
         // Enforce maximum entries limit to prevent memory growth
-        while entries.count > maxEntries {
-            entries.removeFirst()
+        while _entries.count > maxEntries {
+            _entries.removeFirst()
         }
         
         // Print to Xcode console for development
@@ -78,21 +88,48 @@ class ConsoleLogger {
     }
     
     func clear() {
-        entries.removeAll()
+        _entries.removeAll()
     }
 }
 
 struct ConsoleView: View {
-    @State private var logger = ConsoleLogger.shared
     @State private var filterText = ""
     @State private var selectedLevel: ConsoleLogEntry.LogLevel?
     @State private var autoScroll = true
+    @State private var filteredEntries: [ConsoleLogEntry] = []
+    @State private var entryCount: Int = 0
+    @State private var updateTask: Task<Void, Never>?
     
-    var filteredEntries: [ConsoleLogEntry] {
-        logger.entries.filter { entry in
-            let matchesText = filterText.isEmpty || entry.message.localizedCaseInsensitiveContains(filterText) || entry.category.localizedCaseInsensitiveContains(filterText)
-            let matchesLevel = selectedLevel == nil || entry.level == selectedLevel
-            return matchesText && matchesLevel
+    private func updateFilteredEntries() {
+        // Cancel previous update to prevent MainActor saturation
+        updateTask?.cancel()
+        
+        // Capture filter values
+        let filter = filterText
+        let level = selectedLevel
+        
+        // Fetch and filter asynchronously
+        updateTask = Task.detached(priority: .userInitiated) {
+            // Get entries from actor
+            let entries = await ConsoleLogger.shared.getEntries()
+            let count = entries.count
+            
+            // Debounce delay
+            try? await Task.sleep(for: .milliseconds(50))
+            guard !Task.isCancelled else { return }
+            
+            let filtered = entries.filter { entry in
+                let matchesText = filter.isEmpty || entry.message.localizedCaseInsensitiveContains(filter) || entry.category.localizedCaseInsensitiveContains(filter)
+                let matchesLevel = level == nil || entry.level == level
+                return matchesText && matchesLevel
+            }
+            
+            guard !Task.isCancelled else { return }
+            
+            await MainActor.run {
+                self.filteredEntries = filtered
+                self.entryCount = count
+            }
         }
     }
     
@@ -132,7 +169,10 @@ struct ConsoleView: View {
                 
                 // Clear button
                 Button {
-                    logger.clear()
+                    Task {
+                        await ConsoleLogger.shared.clear()
+                        updateFilteredEntries()
+                    }
                 } label: {
                     Label("Clear", systemImage: "trash")
                 }
@@ -154,18 +194,42 @@ struct ConsoleView: View {
                     }
                     .padding(8)
                 }
-                .onChange(of: logger.entries.count) { _, _ in
-                    if autoScroll, let lastEntry = filteredEntries.last {
-                        withAnimation {
-                            proxy.scrollTo(lastEntry.id, anchor: .bottom)
+                .task {
+                    // Poll for new entries periodically
+                    while !Task.isCancelled {
+                        let newCount = await ConsoleLogger.shared.getCount()
+                        if newCount != entryCount {
+                            updateFilteredEntries()
+                            
+                            // Auto-scroll without animation to prevent render loop
+                            if autoScroll {
+                                if let lastEntry = filteredEntries.last {
+                                    proxy.scrollTo(lastEntry.id, anchor: .bottom)
+                                }
+                            }
                         }
+                        try? await Task.sleep(for: .milliseconds(500))
                     }
                 }
+            }
+            .onAppear {
+                updateFilteredEntries()
+            }
+            .onDisappear {
+                // Cancel any pending updates when view is hidden
+                updateTask?.cancel()
+                updateTask = nil
+            }
+            .onChange(of: filterText) { _, _ in
+                updateFilteredEntries()
+            }
+            .onChange(of: selectedLevel) { _, _ in
+                updateFilteredEntries()
             }
             
             // Status bar
             HStack {
-                Text("\(filteredEntries.count) / \(logger.entries.count) entries")
+                Text("\(filteredEntries.count) / \(entryCount) entries")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 
@@ -254,14 +318,8 @@ struct ConsoleEntryView: View {
 }
 
 #Preview {
-    ConsoleLogger.shared.log("App launched", level: .info, category: "App")
-    ConsoleLogger.shared.log("Connecting to irc.libera.chat:6697", level: .info, category: "IRC")
-    ConsoleLogger.shared.log("Connection established", level: .info, category: "Network")
-    ConsoleLogger.shared.log("CAP LS 302 sent", level: .debug, category: "IRC")
-    ConsoleLogger.shared.log("Received: Welcome to Libera.Chat", level: .info, category: "IRC")
-    ConsoleLogger.shared.log("Failed to resolve hostname", level: .warning, category: "Network")
-    ConsoleLogger.shared.log("Connection timeout", level: .error, category: "Network")
-    
-    return ConsoleView()
+    // Note: Preview logs are populated in real-time as app runs
+    // Can't populate synchronously with actor-isolated logger
+    ConsoleView()
         .frame(height: 400)
 }

@@ -11,6 +11,12 @@
 		ED198DE92F491D3F00560FA9 /* IMPLEMENTATION_SUMMARY.md in Resources */ = {isa = PBXBuildFile; fileRef = ED198DE82F491D3F00560FA9 /* IMPLEMENTATION_SUMMARY.md */; };
 		ED198DEB2F491E2800560FA9 /* BUGFIX_CONNECTION_TIMEOUT.md in Resources */ = {isa = PBXBuildFile; fileRef = ED198DEA2F491E2800560FA9 /* BUGFIX_CONNECTION_TIMEOUT.md */; };
 		ED198DEF2F49212D00560FA9 /* REFACTORING_REPORT.md in Resources */ = {isa = PBXBuildFile; fileRef = ED198DEE2F49212D00560FA9 /* REFACTORING_REPORT.md */; };
+		ED198E072F4D2ABC00560FA9 /* SPRINT_AUDIT_2026-02-23.md in Resources */ = {isa = PBXBuildFile; fileRef = ED198E062F4D2ABC00560FA9 /* SPRINT_AUDIT_2026-02-23.md */; };
+		ED198E0B2F4D2C7500560FA9 /* BUGFIX_SUMMARY_2026-02-23B.md in Resources */ = {isa = PBXBuildFile; fileRef = ED198E0A2F4D2C7500560FA9 /* BUGFIX_SUMMARY_2026-02-23B.md */; };
+		ED198E0D2F4D2DB600560FA9 /* DEBUG_LIST_COMMAND.md in Resources */ = {isa = PBXBuildFile; fileRef = ED198E0C2F4D2DB600560FA9 /* DEBUG_LIST_COMMAND.md */; };
+		ED198E0F2F4D2E7500560FA9 /* TEST_LIST_COMMAND.md in Resources */ = {isa = PBXBuildFile; fileRef = ED198E0E2F4D2E7500560FA9 /* TEST_LIST_COMMAND.md */; };
+		ED198E112F4D2EB400560FA9 /* FINAL_SUMMARY_2026-02-23.md in Resources */ = {isa = PBXBuildFile; fileRef = ED198E102F4D2EB400560FA9 /* FINAL_SUMMARY_2026-02-23.md */; };
+		ED198E132F4D2F6E00560FA9 /* TESTING_LIST_COMMAND.md in Resources */ = {isa = PBXBuildFile; fileRef = ED198E122F4D2F6E00560FA9 /* TESTING_LIST_COMMAND.md */; };
 		ED6D44502F4764C100BA4733 /* README.md in Resources */ = {isa = PBXBuildFile; fileRef = ED6D444F2F4764C100BA4733 /* README.md */; };
 /* End PBXBuildFile section */
 
@@ -36,6 +42,12 @@
 		ED198DE82F491D3F00560FA9 /* IMPLEMENTATION_SUMMARY.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = IMPLEMENTATION_SUMMARY.md; sourceTree = "<group>"; };
 		ED198DEA2F491E2800560FA9 /* BUGFIX_CONNECTION_TIMEOUT.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = BUGFIX_CONNECTION_TIMEOUT.md; sourceTree = "<group>"; };
 		ED198DEE2F49212D00560FA9 /* REFACTORING_REPORT.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = REFACTORING_REPORT.md; sourceTree = "<group>"; };
+		ED198E062F4D2ABC00560FA9 /* SPRINT_AUDIT_2026-02-23.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = "SPRINT_AUDIT_2026-02-23.md"; sourceTree = "<group>"; };
+		ED198E0A2F4D2C7500560FA9 /* BUGFIX_SUMMARY_2026-02-23B.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = "BUGFIX_SUMMARY_2026-02-23B.md"; sourceTree = "<group>"; };
+		ED198E0C2F4D2DB600560FA9 /* DEBUG_LIST_COMMAND.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = DEBUG_LIST_COMMAND.md; sourceTree = "<group>"; };
+		ED198E0E2F4D2E7500560FA9 /* TEST_LIST_COMMAND.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = TEST_LIST_COMMAND.md; sourceTree = "<group>"; };
+		ED198E102F4D2EB400560FA9 /* FINAL_SUMMARY_2026-02-23.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = "FINAL_SUMMARY_2026-02-23.md"; sourceTree = "<group>"; };
+		ED198E122F4D2F6E00560FA9 /* TESTING_LIST_COMMAND.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = TESTING_LIST_COMMAND.md; sourceTree = "<group>"; };
 		ED6D43992F47608700BA4733 /* Liquid Chat.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Liquid Chat.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		ED6D43A62F47608800BA4733 /* Liquid ChatTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "Liquid ChatTests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
 		ED6D43B02F47608800BA4733 /* Liquid ChatUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "Liquid ChatUITests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -97,6 +109,12 @@
 				ED198DE82F491D3F00560FA9 /* IMPLEMENTATION_SUMMARY.md */,
 				ED198DEA2F491E2800560FA9 /* BUGFIX_CONNECTION_TIMEOUT.md */,
 				ED198DEE2F49212D00560FA9 /* REFACTORING_REPORT.md */,
+				ED198E062F4D2ABC00560FA9 /* SPRINT_AUDIT_2026-02-23.md */,
+				ED198E0A2F4D2C7500560FA9 /* BUGFIX_SUMMARY_2026-02-23B.md */,
+				ED198E0C2F4D2DB600560FA9 /* DEBUG_LIST_COMMAND.md */,
+				ED198E0E2F4D2E7500560FA9 /* TEST_LIST_COMMAND.md */,
+				ED198E102F4D2EB400560FA9 /* FINAL_SUMMARY_2026-02-23.md */,
+				ED198E122F4D2F6E00560FA9 /* TESTING_LIST_COMMAND.md */,
 			);
 			sourceTree = "<group>";
 		};
@@ -231,8 +249,14 @@
 			buildActionMask = 2147483647;
 			files = (
 				ED6D44502F4764C100BA4733 /* README.md in Resources */,
+				ED198E072F4D2ABC00560FA9 /* SPRINT_AUDIT_2026-02-23.md in Resources */,
 				ED198DEF2F49212D00560FA9 /* REFACTORING_REPORT.md in Resources */,
 				ED198DE92F491D3F00560FA9 /* IMPLEMENTATION_SUMMARY.md in Resources */,
+				ED198E0B2F4D2C7500560FA9 /* BUGFIX_SUMMARY_2026-02-23B.md in Resources */,
+				ED198E0D2F4D2DB600560FA9 /* DEBUG_LIST_COMMAND.md in Resources */,
+				ED198E132F4D2F6E00560FA9 /* TESTING_LIST_COMMAND.md in Resources */,
+				ED198E112F4D2EB400560FA9 /* FINAL_SUMMARY_2026-02-23.md in Resources */,
+				ED198E0F2F4D2E7500560FA9 /* TEST_LIST_COMMAND.md in Resources */,
 				ED198DE32F491B5500560FA9 /* CLAUDE.md in Resources */,
 				ED198DEB2F491E2800560FA9 /* BUGFIX_CONNECTION_TIMEOUT.md in Resources */,
 			);
@@ -421,6 +445,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = YES;
 				CODE_SIGN_IDENTITY = "Apple Development";
 				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
@@ -442,6 +467,7 @@
 				ENABLE_RESOURCE_ACCESS_USB = NO;
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.social-networking";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -466,6 +492,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = YES;
 				CODE_SIGN_IDENTITY = "Apple Development";
 				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
@@ -487,6 +514,7 @@
 				ENABLE_RESOURCE_ACCESS_USB = NO;
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.social-networking";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",

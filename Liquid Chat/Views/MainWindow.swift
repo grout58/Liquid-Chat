@@ -12,6 +12,7 @@ struct MainWindow: View {
     @State private var selectedChannel: IRCChannel?
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
     @State private var showConsole = false
+    @State private var hasLoadedSavedServers = false
     
     // Use shared settings directly without @State copy
     private var settings: AppSettings { AppSettings.shared }
@@ -33,6 +34,18 @@ struct MainWindow: View {
                         systemImage: "bubble.left.and.bubble.right",
                         description: Text("Select a channel from the sidebar to start chatting")
                     )
+                }
+            }
+            .onChange(of: chatState.selectedChannel) { _, newChannel in
+                // Sync ChatState's selected channel to our local binding
+                if let newChannel = newChannel, selectedChannel?.id != newChannel.id {
+                    selectedChannel = newChannel
+                }
+            }
+            .onChange(of: selectedChannel) { _, newChannel in
+                // Sync our local binding back to ChatState
+                if let newChannel = newChannel, chatState.selectedChannel?.id != newChannel.id {
+                    chatState.selectedChannel = newChannel
                 }
             }
             
@@ -60,6 +73,27 @@ struct MainWindow: View {
         .sheet(item: $chatState.showingChannelJoinForServer) { server in
             ChannelJoinView(server: server, chatState: chatState)
                 .themedStyle(settings)
+        }
+        .task {
+            // Load saved servers on app launch
+            guard !hasLoadedSavedServers else { return }
+            hasLoadedSavedServers = true
+            
+            let savedServers = ServerConfigManager.shared.savedServers
+            
+            if !savedServers.isEmpty {
+                await ConsoleLogger.shared.log("Loading \(savedServers.count) saved servers", level: .info, category: "App")
+                
+                for config in savedServers {
+                    chatState.addServer(config: config)
+                    
+                    // Auto-connect if enabled
+                    if config.autoConnect, let server = chatState.servers.last {
+                        await ConsoleLogger.shared.log("Auto-connecting to \(config.hostname)", level: .info, category: "App")
+                        chatState.connectToServer(server)
+                    }
+                }
+            }
         }
     }
 }

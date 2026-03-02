@@ -164,8 +164,8 @@ class IRCCommandHandler {
         // Server information
         case "list":
             connection.send(command: "LIST")
-            // Show the channel list dialog
-            chatState?.showingChannelListForServer = channel.server
+            // Don't show dialog yet - wait for LIST START response
+            // (dialog will be shown in handleListStart to prevent freeze)
             
         case "names":
             connection.send(command: "NAMES", parameters: [channel.name])

@@ -67,11 +67,13 @@ class CatchUpSummarizer {
         self.isAvailable = false
         #endif
         
-        ConsoleLogger.shared.log(
-            isAvailable ? "AI Summarization available" : "AI Summarization unavailable (Apple Intelligence not enabled)",
-            level: .info,
-            category: "AI"
-        )
+        Task {
+            await ConsoleLogger.shared.log(
+                isAvailable ? "AI Summarization available" : "AI Summarization unavailable (Apple Intelligence not enabled)",
+                level: .info,
+                category: "AI"
+            )
+        }
     }
     
     /// Generate a summary of recent chat messages
@@ -112,7 +114,7 @@ class CatchUpSummarizer {
         - Overall sentiment (positive, neutral, or negative)
         """
         
-        ConsoleLogger.shared.log("Generating summary for \(messages.count) messages", level: .info, category: "AI")
+        Task { await ConsoleLogger.shared.log("Generating summary for \(messages.count) messages", level: .info, category: "AI") }
         
         // Use structured generation to get a typed response
         // Use temperature from settings
@@ -127,7 +129,7 @@ class CatchUpSummarizer {
         )
         
         let summary = response.content
-        ConsoleLogger.shared.log("Summary generated: \(summary.keyPoints.count) key points", level: .info, category: "AI")
+        Task { await ConsoleLogger.shared.log("Summary generated: \(summary.keyPoints.count) key points", level: .info, category: "AI") }
         
         return summary
         #else

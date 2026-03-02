@@ -234,11 +234,15 @@ struct ServerConnectionView: View {
         saveServer = true
         
         let config = createConfig()
-        ConsoleLogger.shared.log("Saving server: \(config.displayName) with ID: \(config.id)", level: .info, category: "Settings")
-        ConsoleLogger.shared.log("Current saved servers count: \(serverManager.savedServers.count)", level: .debug, category: "Settings")
+        Task {
+            await ConsoleLogger.shared.log("Saving server: \(config.displayName) with ID: \(config.id)", level: .info, category: "Settings")
+            await ConsoleLogger.shared.log("Current saved servers count: \(serverManager.savedServers.count)", level: .debug, category: "Settings")
+        }
         serverManager.saveServer(config)
-        ConsoleLogger.shared.log("After save, saved servers count: \(serverManager.savedServers.count)", level: .debug, category: "Settings")
-        ConsoleLogger.shared.log("Saved servers: \(serverManager.savedServers.map { $0.displayName })", level: .debug, category: "Settings")
+        Task {
+            await ConsoleLogger.shared.log("After save, saved servers count: \(serverManager.savedServers.count)", level: .debug, category: "Settings")
+            await ConsoleLogger.shared.log("Saved servers: \(serverManager.savedServers.map { $0.displayName })", level: .debug, category: "Settings")
+        }
         
         // Update the selected server to reflect the save
         selectedSavedServer = config

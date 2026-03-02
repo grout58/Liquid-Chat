@@ -196,7 +196,8 @@ struct ServerHeaderView: View {
                 Button {
                     if let connection = server.connection {
                         connection.send(command: "LIST")
-                        chatState.showingChannelListForServer = server
+                        // Don't show dialog yet - wait for LIST START response
+                        // (dialog will be shown automatically to prevent freeze)
                     }
                 } label: {
                     Label("List Channels", systemImage: "list.bullet")

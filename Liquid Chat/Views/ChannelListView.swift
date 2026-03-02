@@ -15,6 +15,9 @@ struct ChannelListView: View {
     @State private var searchText = ""
     @State private var selectedChannel: IRCChannelListEntry?
     @State private var sortOrder: SortOrder = .userCount
+    @State private var filteredAndSortedChannels: [IRCChannelListEntry] = []
+    @State private var isProcessing = false
+    @State private var filterTask: Task<Void, Never>?
     
     private var settings: AppSettings { AppSettings.shared }
     
@@ -30,31 +33,57 @@ struct ChannelListView: View {
         }
     }
     
-    private var filteredAndSortedChannels: [IRCChannelListEntry] {
-        var channels = server.availableChannels
-        
-        // Filter by search text
-        if !searchText.isEmpty {
-            channels = channels.filter { channel in
-                channel.name.localizedCaseInsensitiveContains(searchText) ||
-                channel.topic.localizedCaseInsensitiveContains(searchText)
+    /// Update filtered channels asynchronously to prevent UI lockup
+    /// Uses debouncing and background processing for large lists
+    private func updateFilteredChannels() {
+        // Cancel any in-flight task before starting a new one
+        filterTask?.cancel()
+        isProcessing = true
+
+        // Capture values to avoid concurrency issues
+        let channels = server.availableChannels
+        let search = searchText
+        let sort = sortOrder
+
+        filterTask = Task.detached(priority: .userInitiated) {
+            // Filter (in background thread for large lists)
+            let filtered: [IRCChannelListEntry]
+            if !search.isEmpty {
+                filtered = channels.filter { channel in
+                    channel.name.localizedCaseInsensitiveContains(search) ||
+                    channel.topic.localizedCaseInsensitiveContains(search)
+                }
+            } else {
+                filtered = channels
             }
+            
+            // Limit to reasonable size for display (prevents massive lists from crashing UI)
+            let maxDisplayChannels = 5000
+            let limited = filtered.count > maxDisplayChannels 
+                ? Array(filtered.prefix(maxDisplayChannels))
+                : filtered
+            
+            // Sort (in background thread)
+            let sorted: [IRCChannelListEntry]
+            switch sort {
+            case .userCount:
+                sorted = limited.sorted { $0.userCount > $1.userCount }
+            case .name:
+                sorted = limited.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+            }
+            
+            // Update UI on main thread
+            await MainActor.run {
+                self.filteredAndSortedChannels = sorted
+                self.isProcessing = false
+            }
+            await ConsoleLogger.shared.log("ChannelListView: Display updated with \(sorted.count) channels", level: .debug, category: "UI")
         }
-        
-        // Sort
-        switch sortOrder {
-        case .userCount:
-            channels.sort { $0.userCount > $1.userCount }
-        case .name:
-            channels.sort { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
-        }
-        
-        return channels
     }
     
     var body: some View {
         VStack(spacing: 0) {
-            // Header
+            // Header - Use subtle background instead of themed card
             HStack {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Channel List")
@@ -70,9 +99,17 @@ struct ChannelListView: View {
                                 .foregroundStyle(.secondary)
                         }
                     } else {
-                        Text("\(filteredAndSortedChannels.count) channels")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                        HStack(spacing: 4) {
+                            Text("\(filteredAndSortedChannels.count) channels")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            
+                            if server.availableChannels.count > 5000 {
+                                Text("(showing first 5000)")
+                                    .font(.caption2)
+                                    .foregroundStyle(.orange)
+                            }
+                        }
                     }
                 }
                 
@@ -88,21 +125,22 @@ struct ChannelListView: View {
                 .buttonStyle(.plain)
             }
             .padding()
-            .themedCard(cornerRadius: 12, settings: settings)
             .padding(.horizontal, 16)
             .padding(.top, 16)
             
-            // Search and filter bar
+            // Search and filter bar with minimal styling
             HStack(spacing: 12) {
-                HStack {
+                HStack(spacing: 8) {
                     Image(systemName: "magnifyingglass")
                         .foregroundStyle(.secondary)
+                        .imageScale(.small)
                     
                     TextField("Search channels...", text: $searchText)
                         .textFieldStyle(.plain)
                 }
-                .padding(8)
-                .themedCard(cornerRadius: 8, settings: settings)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 8))
                 
                 Picker("Sort by", selection: $sortOrder) {
                     Text("Users").tag(SortOrder.userCount)
@@ -139,7 +177,7 @@ struct ChannelListView: View {
                 }
             }
             
-            // Footer with join button
+            // Footer with join button - simplified styling
             HStack {
                 if let selected = selectedChannel {
                     VStack(alignment: .leading, spacing: 4) {
@@ -165,20 +203,52 @@ struct ChannelListView: View {
                 .disabled(selectedChannel == nil)
             }
             .padding()
-            .themedCard(cornerRadius: 12, settings: settings)
             .padding(.horizontal, 16)
             .padding(.bottom, 16)
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 0))
         }
         .frame(width: 700, height: 600)
-        .themedBackground(settings)
+        .background(.regularMaterial)
+        .onAppear {
+            Task { await ConsoleLogger.shared.log("ChannelListView appeared for server: \(server.config.hostname)", level: .info, category: "UI") }
+            updateFilteredChannels()
+            
+            // Add timeout to prevent infinite loading
+            Task {
+                try? await Task.sleep(for: .seconds(30))
+                if await MainActor.run(body: { server.isLoadingChannelList }) {
+                    await ConsoleLogger.shared.log("Channel list loading timeout - forcing completion", level: .warning, category: "UI")
+                    await MainActor.run {
+                        server.isLoadingChannelList = false
+                    }
+                }
+            }
+        }
+        .onChange(of: server.availableChannels.count) { oldCount, newCount in
+            // Skip updates while loading to prevent MainActor saturation
+            guard !server.isLoadingChannelList else { return }
+            Task { await ConsoleLogger.shared.log("Channel count changed: \(oldCount) → \(newCount)", level: .debug, category: "UI") }
+            updateFilteredChannels()
+        }
+        .onChange(of: server.isLoadingChannelList) { wasLoading, isNowLoading in
+            // When loading finishes, update the display
+            if wasLoading && !isNowLoading {
+                Task { await ConsoleLogger.shared.log("Channel loading completed, refreshing display", level: .debug, category: "UI") }
+                updateFilteredChannels()
+            }
+        }
+        .onChange(of: searchText) { _, _ in
+            updateFilteredChannels()
+        }
+        .onChange(of: sortOrder) { _, _ in
+            updateFilteredChannels()
+        }
     }
 }
 
 struct ChannelListRowView: View {
     let channel: IRCChannelListEntry
     let isSelected: Bool
-    
-    private var settings: AppSettings { AppSettings.shared }
     
     var body: some View {
         HStack(spacing: 12) {
@@ -192,7 +262,6 @@ struct ChannelListRowView: View {
                 HStack(spacing: 8) {
                     Text(channel.name)
                         .font(.headline)
-                        .foregroundStyle(isSelected ? .primary : .primary)
                     
                     Spacer()
                     
@@ -207,7 +276,7 @@ struct ChannelListRowView: View {
                     .foregroundStyle(.secondary)
                     .padding(.horizontal, 8)
                     .padding(.vertical, 4)
-                    .background(.quaternary)
+                    .background(.quaternary.opacity(0.6))
                     .clipShape(Capsule())
                 }
                 
@@ -220,8 +289,16 @@ struct ChannelListRowView: View {
             }
         }
         .padding(12)
-        .background(isSelected ? Color.blue.opacity(0.1) : Color.clear)
-        .themedCard(cornerRadius: 12, settings: settings)
+        .background {
+            if isSelected {
+                RoundedRectangle(cornerRadius: 10)
+                    .fill(.tint.opacity(0.15))
+            } else {
+                RoundedRectangle(cornerRadius: 10)
+                    .fill(.quaternary.opacity(0.3))
+            }
+        }
+        .contentShape(Rectangle())
     }
 }
 

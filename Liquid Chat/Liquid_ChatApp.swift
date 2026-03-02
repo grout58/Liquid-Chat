@@ -11,7 +11,9 @@ import SwiftUI
 @main
 struct Liquid_ChatApp: App {
     init() {
-        ConsoleLogger.shared.log("Liquid Chat launched", level: .info, category: "App")
+        Task {
+            await ConsoleLogger.shared.log("Liquid Chat launched", level: .info, category: "App")
+        }
     }
     
     var body: some Scene {

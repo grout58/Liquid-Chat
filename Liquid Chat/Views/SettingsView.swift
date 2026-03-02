@@ -189,6 +189,20 @@ struct AISettingsView: View {
                 .disabled(!settings.enableAIFeatures)
             }
             
+            SettingsSection(title: "Smart Replies", icon: "bubble.left.and.text.bubble.right") {
+                VStack(alignment: .leading, spacing: 12) {
+                    Toggle("Enable Smart Reply Suggestions", isOn: $settings.enableSmartReplies)
+                    
+                    Toggle("Auto-Send Smart Replies", isOn: $settings.autoSendSmartReplies)
+                        .disabled(!settings.enableSmartReplies)
+                    
+                    Text("AI-powered contextual reply suggestions based on recent conversation")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .disabled(!settings.enableAIFeatures)
+            }
+            
             SettingsSection(title: "Auto-Summarization", icon: "text.quote") {
                 VStack(alignment: .leading, spacing: 12) {
                     HStack {

@@ -12,7 +12,7 @@ import FoundationModels
 
 /// Represents a recommended IRC channel with relevance score
 struct ChannelRecommendation: Identifiable, Codable {
-    let id = UUID()
+    var id = UUID()
     let channelName: String
     let reason: String
     let relevanceScore: Double // 0.0 - 1.0
@@ -31,9 +31,9 @@ class ChannelRecommender {
     
     init() {
         #if canImport(FoundationModels)
-        ConsoleLogger.shared.log("ChannelRecommender initialized with FoundationModels support", level: .info, category: "AI")
+        Task { await ConsoleLogger.shared.log("ChannelRecommender initialized with FoundationModels support", level: .info, category: "AI") }
         #else
-        ConsoleLogger.shared.log("ChannelRecommender initialized without FoundationModels (requires macOS 26+)", level: .warning, category: "AI")
+        Task { await ConsoleLogger.shared.log("ChannelRecommender initialized without FoundationModels (requires macOS 26+)", level: .warning, category: "AI") }
         #endif
     }
     
@@ -102,39 +102,40 @@ class ChannelRecommender {
         
         let session = LanguageModelSession(model: model)
         
-        // Format recent messages for analysis (last 50 messages max)
-        let recentMessages = messages.suffix(50)
+        // Format recent messages for analysis (reduced to last 20 messages to fit context)
+        let recentMessages = messages.suffix(20)
         let conversationSummary = formatMessagesForAnalysis(Array(recentMessages))
         
-        // Format available channels (limit to top 100 by user count)
+        // Format available channels (reduced to top 30 by user count to fit context)
         let topChannels = availableChannels
             .sorted { $0.userCount > $1.userCount }
-            .prefix(100)
+            .prefix(30)
         
+        // Compact channel list format to save tokens
         let channelList = topChannels.map { channel in
-            "\(channel.name) (\(channel.userCount) users): \(channel.topic)"
+            let topic = channel.topic.isEmpty ? "no topic" : (channel.topic.count > 50 ? String(channel.topic.prefix(50)) + "..." : channel.topic)
+            return "\(channel.name) (\(channel.userCount)): \(topic)"
         }.joined(separator: "\n")
         
-        // Create AI prompt for channel recommendations
+        // Create AI prompt for channel recommendations (simplified to reduce tokens)
         let prompt = """
-        Analyze this IRC conversation and recommend 3-5 similar channels from the available list.
+        Recommend 3 IRC channels from this list based on the conversation.
         
-        Current Channel: \(currentChannel)
+        Current: \(currentChannel)
         
-        Recent Conversation Summary:
+        Recent chat:
         \(conversationSummary)
         
-        Available Channels:
+        Channels:
         \(channelList)
         
-        Provide recommendations with:
-        - Channel name (must be from the available list)
-        - Brief reason why it's relevant (1 sentence)
-        - Relevance score (0.0-1.0, where 1.0 is most relevant)
-        - Similar topics discussed (2-3 keywords)
+        For each:
+        - Channel name (from list above)
+        - Brief reason (5-10 words)
+        - Score (0.0-1.0)
+        - Topics (2-3 words)
         
-        Focus on channels with similar technical topics, programming languages, or community interests.
-        Do not recommend the current channel or channels with very low user counts (<5 users).
+        Match technical topics and interests. Skip current channel.
         """
         
         // Configure generation options
@@ -152,7 +153,7 @@ class ChannelRecommender {
             )
             response = result.content
         } catch {
-            ConsoleLogger.shared.log("AI recommendation generation failed: \(error)", level: .error, category: "AI")
+            Task { await ConsoleLogger.shared.log("AI recommendation generation failed: \(error)", level: .error, category: "AI") }
             throw RecommenderError.generationFailed(error.localizedDescription)
         }
         
@@ -175,7 +176,7 @@ class ChannelRecommender {
             }
             .sorted { $0.relevanceScore > $1.relevanceScore }
         
-        ConsoleLogger.shared.log("Generated \(result.count) AI-powered channel recommendations", level: .info, category: "AI")
+        Task { await ConsoleLogger.shared.log("Generated \(result.count) AI-powered channel recommendations", level: .info, category: "AI") }
         return result
     }
     
@@ -195,7 +196,7 @@ class ChannelRecommender {
         availableChannels: [IRCChannelListEntry],
         currentChannel: String
     ) -> [ChannelRecommendation] {
-        ConsoleLogger.shared.log("Using basic keyword matching (FoundationModels unavailable)", level: .info, category: "AI")
+        Task { await ConsoleLogger.shared.log("Using basic keyword matching (FoundationModels unavailable)", level: .info, category: "AI") }
         
         // Extract keywords from recent messages
         let recentMessages = messages.suffix(50)
@@ -252,18 +253,16 @@ class ChannelRecommender {
         "about", "after", "before", "other", "into", "through", "there"
     ]
     
-    /// Format messages for AI analysis
+    /// Format messages for AI analysis (compact format to save tokens)
     private func formatMessagesForAnalysis(_ messages: [IRCChatMessage]) -> String {
         let formatted = messages
             .filter { $0.type == .message || $0.type == .action }
-            .suffix(30) // Last 30 substantive messages
+            .suffix(15) // Reduced to last 15 messages to fit context
             .map { message -> String in
                 let content = String(message.content.characters)
-                if message.type == .action {
-                    return "* \(message.sender) \(content)"
-                } else {
-                    return "<\(message.sender)> \(content)"
-                }
+                // Truncate long messages to save tokens
+                let truncated = content.count > 100 ? String(content.prefix(100)) + "..." : content
+                return "<\(message.sender)> \(truncated)"
             }
             .joined(separator: "\n")
         

@@ -18,7 +18,7 @@ actor ChannelLogger {
     // Keep track of open file handles for better performance
     private var fileHandles: [String: FileHandle] = [:]
     private var lastAccessTime: [String: Date] = [:]
-    private var cleanupTask: Task<Void, Never>?
+    private nonisolated(unsafe) var cleanupTask: Task<Void, Never>?
     
     private init() {
         // Setup base directory: ~/Library/Application Support/Liquid Chat/Logs
@@ -37,12 +37,18 @@ actor ChannelLogger {
         timestampFormatter.dateFormat = "HH:mm:ss"
         
         // Log initialization asynchronously
-        Task { @MainActor in
-            ConsoleLogger.shared.log("Channel logger initialized at \(baseURL.path)", level: .info, category: "Logger")
+        Task {
+            await ConsoleLogger.shared.log("Channel logger initialized at \(baseURL.path)", level: .info, category: "Logger")
         }
         
-        // Start periodic cleanup task
-        startCleanupTask()
+        // Start periodic cleanup task in detached context to respect actor isolation
+        // Using nonisolated(unsafe) is safe here because Task is created once and only cancelled in deinit
+        cleanupTask = Task {
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(300)) // Every 5 minutes
+                await ChannelLogger.shared.cleanupInactiveHandles()
+            }
+        }
     }
     
     deinit {
@@ -54,17 +60,7 @@ actor ChannelLogger {
             try? handle.close()
         }
     }
-    
-    /// Start periodic cleanup of inactive file handles
-    private func startCleanupTask() {
-        cleanupTask = Task {
-            while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(300)) // Every 5 minutes
-                await cleanupInactiveHandles()
-            }
-        }
-    }
-    
+
     /// Close file handles that haven't been accessed in 5 minutes
     private func cleanupInactiveHandles() {
         let now = Date()
@@ -100,9 +96,7 @@ actor ChannelLogger {
             do {
                 try FileManager.default.createDirectory(at: directoryURL, withIntermediateDirectories: true)
             } catch {
-                await MainActor.run {
-                    ConsoleLogger.shared.log("Failed to create log directory: \(error)", level: .error, category: "Logger")
-                }
+                await ConsoleLogger.shared.log("Failed to create log directory: \(error)", level: .error, category: "Logger")
                 return
             }
         }
@@ -175,9 +169,7 @@ actor ChannelLogger {
                 }
             }
         } catch {
-            await MainActor.run {
-                ConsoleLogger.shared.log("Failed to write to log: \(error)", level: .error, category: "Logger")
-            }
+            await ConsoleLogger.shared.log("Failed to write to log: \(error)", level: .error, category: "Logger")
         }
     }
     

@@ -10,6 +10,7 @@ import SwiftUI
 struct ChatSearchView: View {
     let channel: IRCChannel
     @Binding var isPresented: Bool
+    @Binding var currentSearchText: String?
     @FocusState private var isSearchFieldFocused: Bool
     @State private var searchText = ""
     @State private var currentMatchIndex = 0
@@ -72,8 +73,9 @@ struct ChatSearchView: View {
                         .onSubmit {
                             navigateToNext()
                         }
-                        .onChange(of: searchText) { _, _ in
+                        .onChange(of: searchText) { _, newValue in
                             currentMatchIndex = 0
+                            currentSearchText = newValue.isEmpty ? nil : newValue
                         }
                     
                     // Clear button
@@ -210,6 +212,9 @@ struct ChatSearchView: View {
         .onAppear {
             isSearchFieldFocused = true
         }
+        .onDisappear {
+            currentSearchText = nil
+        }
         .onKeyPress(.escape) {
             isPresented = false
             return .handled
@@ -268,31 +273,38 @@ extension Notification.Name {
 // MARK: - Preview
 
 #Preview {
-    @Previewable @State var isPresented = true
-    
-    let channel = IRCChannel(
-        name: "#swift",
-        server: IRCServer(config: IRCServerConfig(
-            hostname: "irc.libera.chat",
-            useSSL: true,
-            nickname: "TestUser"
-        ))
-    )
-    
-    channel.messages = [
-        IRCChatMessage(sender: "Alice", content: "Hello everyone! Welcome to #swift", type: .message),
-        IRCChatMessage(sender: "Bob", content: "Hi Alice, how are you doing today?", type: .message),
-        IRCChatMessage(sender: "Charlie", content: "Working on a SwiftUI project", type: .message),
-        IRCChatMessage(sender: "Alice", content: "That sounds exciting! What kind of project?", type: .message),
-        IRCChatMessage(sender: "Charlie", content: "Building a macOS app with Liquid Glass effects", type: .message),
-    ]
-    
-    return VStack {
-        if isPresented {
-            ChatSearchView(channel: channel, isPresented: $isPresented)
-                .padding()
+    struct PreviewWrapper: View {
+        @State var isPresented = true
+        @State var searchText: String? = nil
+        
+        var body: some View {
+            let channel = IRCChannel(
+                name: "#swift",
+                server: IRCServer(config: IRCServerConfig(
+                    hostname: "irc.libera.chat",
+                    useSSL: true,
+                    nickname: "TestUser"
+                ))
+            )
+            
+            channel.messages = [
+                IRCChatMessage(sender: "Alice", content: "Hello everyone! Welcome to #swift", type: .message),
+                IRCChatMessage(sender: "Bob", content: "Hi Alice, how are you doing today?", type: .message),
+                IRCChatMessage(sender: "Charlie", content: "Working on a SwiftUI project", type: .message),
+                IRCChatMessage(sender: "Alice", content: "That sounds exciting! What kind of project?", type: .message),
+                IRCChatMessage(sender: "Charlie", content: "Building a macOS app with Liquid Glass effects", type: .message),
+            ]
+            
+            return VStack {
+                if isPresented {
+                    ChatSearchView(channel: channel, isPresented: $isPresented, currentSearchText: $searchText)
+                        .padding()
+                }
+                Spacer()
+            }
+            .frame(width: 600, height: 400)
         }
-        Spacer()
     }
-    .frame(width: 600, height: 400)
+    
+    return PreviewWrapper()
 }

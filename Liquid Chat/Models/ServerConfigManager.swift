@@ -25,16 +25,16 @@ class ServerConfigManager {
     /// Load saved servers from UserDefaults
     private func loadSavedServers() {
         guard let data = UserDefaults.standard.data(forKey: userDefaultsKey) else {
-            ConsoleLogger.shared.log("No saved servers found in UserDefaults", level: .info, category: "Settings")
+            Task { await ConsoleLogger.shared.log("No saved servers found in UserDefaults", level: .info, category: "Settings") }
             savedServers = []
             return
         }
         
         do {
             savedServers = try JSONDecoder().decode([IRCServerConfig].self, from: data)
-            ConsoleLogger.shared.log("Loaded \(savedServers.count) saved servers", level: .info, category: "Settings")
+            Task { await ConsoleLogger.shared.log("Loaded \(savedServers.count) saved servers", level: .info, category: "Settings") }
         } catch {
-            ConsoleLogger.shared.log("Failed to load saved servers: \(error)", level: .error, category: "Settings")
+            Task { await ConsoleLogger.shared.log("Failed to load saved servers: \(error)", level: .error, category: "Settings") }
             savedServers = []
         }
     }
@@ -45,9 +45,9 @@ class ServerConfigManager {
             let data = try JSONEncoder().encode(savedServers)
             UserDefaults.standard.set(data, forKey: userDefaultsKey)
             UserDefaults.standard.synchronize() // Force write to disk
-            ConsoleLogger.shared.log("Persisted \(savedServers.count) servers to UserDefaults", level: .debug, category: "Settings")
+            Task { await ConsoleLogger.shared.log("Persisted \(savedServers.count) servers to UserDefaults", level: .debug, category: "Settings") }
         } catch {
-            ConsoleLogger.shared.log("Failed to save servers: \(error)", level: .error, category: "Settings")
+            Task { await ConsoleLogger.shared.log("Failed to save servers: \(error)", level: .error, category: "Settings") }
         }
     }
     

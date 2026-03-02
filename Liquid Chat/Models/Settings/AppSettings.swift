@@ -118,6 +118,20 @@ class AppSettings {
         }
     }
     
+    /// Enable smart reply suggestions (NEW macOS 26 AI Feature)
+    var enableSmartReplies: Bool {
+        didSet {
+            UserDefaults.standard.set(enableSmartReplies, forKey: "enableSmartReplies")
+        }
+    }
+    
+    /// Auto-send smart replies without confirmation
+    var autoSendSmartReplies: Bool {
+        didSet {
+            UserDefaults.standard.set(autoSendSmartReplies, forKey: "autoSendSmartReplies")
+        }
+    }
+    
     // MARK: - Advanced Settings
     
     /// Enable console logging
@@ -180,6 +194,8 @@ class AppSettings {
             ? UserDefaults.standard.double(forKey: "aiTemperature") : 0.3
         self.autoSummarizeThreshold = UserDefaults.standard.integer(forKey: "autoSummarizeThreshold") != 0
             ? UserDefaults.standard.integer(forKey: "autoSummarizeThreshold") : 100
+        self.enableSmartReplies = UserDefaults.standard.object(forKey: "enableSmartReplies") as? Bool ?? true
+        self.autoSendSmartReplies = UserDefaults.standard.object(forKey: "autoSendSmartReplies") as? Bool ?? false
         
         self.enableConsoleLogging = UserDefaults.standard.object(forKey: "enableConsoleLogging") as? Bool ?? true
         let logLevelRaw = UserDefaults.standard.string(forKey: "consoleLogLevel") ?? "info"
@@ -210,6 +226,8 @@ class AppSettings {
         enableAIFeatures = true
         aiTemperature = 0.3
         autoSummarizeThreshold = 100
+        enableSmartReplies = true
+        autoSendSmartReplies = false
         
         enableConsoleLogging = true
         consoleLogLevel = .info

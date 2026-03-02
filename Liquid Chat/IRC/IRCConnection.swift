@@ -8,9 +8,11 @@
 import Foundation
 import Network
 
-// Convenience logging
+// Convenience logging - calls actor directly (thread-safe)
 private func log(_ message: String, level: ConsoleLogEntry.LogLevel = .info) {
-    ConsoleLogger.shared.log(message, level: level, category: "IRC")
+    Task {
+        await ConsoleLogger.shared.log(message, level: level, category: "IRC")
+    }
 }
 
 // MARK: - String Extension for SASL Chunking
@@ -130,14 +132,20 @@ class IRCConnection {
     
     /// Connect to the IRC server
     func connect() {
-        ConsoleLogger.shared.log("connect() called, current state: \(state)", level: .debug, category: "IRC")
+        Task {
+            await ConsoleLogger.shared.log("connect() called, current state: \(state)", level: .debug, category: "IRC")
+        }
         guard state == .disconnected else {
-            ConsoleLogger.shared.log("Already connecting/connected, ignoring", level: .debug, category: "IRC")
+            Task {
+                await ConsoleLogger.shared.log("Already connecting/connected, ignoring", level: .debug, category: "IRC")
+            }
             return
         }
         
         state = .connecting
-        ConsoleLogger.shared.log("Connecting to \(config.hostname):\(config.port) (SSL: \(config.useSSL))", level: .info, category: "IRC")
+        Task {
+            await ConsoleLogger.shared.log("Connecting to \(config.hostname):\(config.port) (SSL: \(config.useSSL))", level: .info, category: "IRC")
+        }
         
         // Configure NWConnection parameters
         let parameters: NWParameters
@@ -189,15 +197,11 @@ class IRCConnection {
             case .failed(let error):
                 log("Connection failed: \(error.localizedDescription)", level: .error)
                 self.state = .error(error.localizedDescription)
-                Task { @MainActor in
-                    self.delegate?.connectionDidFail(self, error: error)
-                }
+                self.delegate?.connectionDidFail(self, error: error)
             case .cancelled:
                 log("Connection cancelled", level: .info)
                 self.state = .disconnected
-                Task { @MainActor in
-                    self.delegate?.connectionDidDisconnect(self)
-                }
+                self.delegate?.connectionDidDisconnect(self)
             case .waiting(let error):
                 log("Connection waiting: \(error.localizedDescription)", level: .warning)
             case .preparing:
@@ -214,9 +218,7 @@ class IRCConnection {
     private func handleConnectionReady() {
         log("Connection ready to \(config.hostname):\(config.port)", level: .info)
         state = .connected
-        Task { @MainActor in
-            self.delegate?.connectionDidConnect(self)
-        }
+        delegate?.connectionDidConnect(self)
         performIRCHandshake()
     }
     
@@ -298,11 +300,8 @@ class IRCConnection {
         connection?.send(content: data, completion: .contentProcessed { [weak self] error in
             if let error = error {
                 log("Send error: \(error)", level: .error)
-                if let self = self {
-                    Task { @MainActor in
-                        self.delegate?.connection(self, didEncounterError: error)
-                    }
-                }
+                guard let self else { return }
+                self.delegate?.connection(self, didEncounterError: error)
             }
         })
     }
@@ -318,9 +317,7 @@ class IRCConnection {
             }
             
             if let error = error {
-                Task { @MainActor in
-                    self.delegate?.connection(self, didEncounterError: error)
-                }
+                self.delegate?.connection(self, didEncounterError: error)
                 return
             }
             
@@ -363,6 +360,11 @@ class IRCConnection {
             return // Don't forward batch markers to delegate
         }
         
+        // Disabled: Logging every LIST message causes MainActor saturation with 10K+ channels
+        // if ["321", "322", "323"].contains(parsed.command) {
+        //     log("LIST message: \(parsed.command) with \(parsed.parameters.count) params", level: .debug)
+        // }
+        
         // Handle server-specific messages
         switch parsed.command {
         case "PING":
@@ -389,9 +391,7 @@ class IRCConnection {
             log("✓ Registered successfully", level: .info)
             state = .registered
             serverName = parsed.prefix
-            Task { @MainActor in
-                self.delegate?.connectionDidRegister(self)
-            }
+            delegate?.connectionDidRegister(self)
             
         case "433": // ERR_NICKNAMEINUSE
             log("Nickname in use, trying alternate", level: .warning)
@@ -408,10 +408,9 @@ class IRCConnection {
             return
         }
         
-        // Forward to delegate
-        Task { @MainActor in
-            self.delegate?.connection(self, didReceiveMessage: parsed)
-        }
+        // Forward to delegate (delegate handles MainActor dispatch)
+        // DO NOT wrap in Task here - delegate is nonisolated and handles its own MainActor hop
+        delegate?.connection(self, didReceiveMessage: parsed)
     }
     
     private func handleCapabilityResponse(_ message: IRCMessage) {
@@ -589,10 +588,8 @@ class IRCConnection {
             if let batchMessages = currentBatches[batchID] {
                 log("Completed batch: \(batchID) with \(batchMessages.count) messages", level: .debug)
                 // Forward all batch messages to delegate at once
-                Task { @MainActor in
-                    for msg in batchMessages {
-                        self.delegate?.connection(self, didReceiveMessage: msg)
-                    }
+                for msg in batchMessages {
+                    delegate?.connection(self, didReceiveMessage: msg)
                 }
                 currentBatches.removeValue(forKey: batchID)
             }

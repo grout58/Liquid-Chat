@@ -47,6 +47,39 @@ enum ServerConnectionState {
     }
 }
 
+/// Thread-safe buffer actor for channel list updates
+/// Accumulates ALL entries and flushes ONCE to prevent MainActor saturation
+actor ChannelListBuffer {
+    private var buffer: [IRCChannelListEntry] = []
+    private weak var server: IRCServer?
+    
+    init(server: IRCServer) {
+        self.server = server
+    }
+    
+    /// Add entry to buffer (no automatic flushing)
+    func addEntry(_ entry: IRCChannelListEntry) {
+        buffer.append(entry)
+    }
+    
+    /// Flush all entries at once with sorting
+    func flush() async {
+        guard !buffer.isEmpty else { return }
+        
+        // Sort in background before MainActor hop
+        let sortedBatch = buffer.sorted { $0.userCount > $1.userCount }
+        buffer.removeAll()
+        
+        // Single MainActor hop for entire dataset
+        if let server = self.server {
+            await MainActor.run {
+                server.availableChannels = sortedBatch  // Replace, don't append
+            }
+            await ConsoleLogger.shared.log("✓ Loaded and sorted \(sortedBatch.count) channels", level: .info, category: "IRC")
+        }
+    }
+}
+
 /// Represents an IRC server
 @Observable
 class IRCServer: Identifiable {
@@ -62,54 +95,33 @@ class IRCServer: Identifiable {
     /// Task for observing connection state changes (can be cancelled)
     var observationTask: Task<Void, Never>?
     
-    /// Temporary buffer for batching channel list updates (not observable)
-    private var channelListBuffer: [IRCChannelListEntry] = []
-    private var listUpdateTask: Task<Void, Never>?
+    /// Actor-isolated buffer for thread-safe channel list updates
+    private var channelListBuffer: ChannelListBuffer!
     
     init(config: IRCServerConfig) {
         self.config = config
+        self.channelListBuffer = ChannelListBuffer(server: self)
     }
     
     /// Cancel any ongoing observation tasks
     func cancelObservation() {
         observationTask?.cancel()
         observationTask = nil
-        listUpdateTask?.cancel()
-        listUpdateTask = nil
     }
     
     /// Add channel to buffer for batched updates
-    @MainActor
+    /// Thread-safe: Can be called from any thread without blocking
     func bufferChannelListEntry(_ entry: IRCChannelListEntry) {
-        channelListBuffer.append(entry)
-        
-        // Schedule a batched update if not already scheduled
-        if listUpdateTask == nil {
-            listUpdateTask = Task { @MainActor in
-                // Wait a bit to accumulate more entries
-                try? await Task.sleep(for: .milliseconds(100))
-                
-                // Append all buffered entries at once
-                if !channelListBuffer.isEmpty {
-                    availableChannels.append(contentsOf: channelListBuffer)
-                    channelListBuffer.removeAll(keepingCapacity: true)
-                }
-                
-                listUpdateTask = nil
-            }
+        // Simple Task - actor handles queuing internally
+        Task { [buffer = self.channelListBuffer] in
+            await buffer.addEntry(entry)
         }
     }
     
-    /// Flush any remaining buffered entries
-    @MainActor
-    func flushChannelListBuffer() {
-        listUpdateTask?.cancel()
-        listUpdateTask = nil
-        
-        if !channelListBuffer.isEmpty {
-            availableChannels.append(contentsOf: channelListBuffer)
-            channelListBuffer.removeAll()
-        }
+    /// Flush all buffered entries at once
+    /// Thread-safe: Can be called from any thread
+    func flushChannelListBuffer() async {
+        await channelListBuffer.flush()
     }
 }
 
@@ -128,8 +140,15 @@ class IRCChannel: Identifiable, Hashable {
     let name: String
     let server: IRCServer
     var topic: String = ""
+    
+    /// Messages array - kept as regular property so SwiftUI can observe it
+    /// The key insight: SwiftUI is smart enough to only re-render visible rows in LazyVStack
+    /// The MainActor saturation was from the double-hop, not from observation itself
     var messages: [IRCChatMessage] = []
+    
+    /// Users array
     var users: [IRCUser] = []
+    
     var isJoined: Bool = false
     
     /// Is this a private message (DM) rather than a channel?

@@ -85,9 +85,7 @@ actor URLPreviewFetcher {
             return preview
             
         } catch {
-            await MainActor.run {
-                ConsoleLogger.shared.log("Failed to fetch URL preview: \(error.localizedDescription)", level: .warning, category: "URLPreview")
-            }
+            await ConsoleLogger.shared.log("Failed to fetch URL preview: \(error.localizedDescription)", level: .warning, category: "URLPreview")
             return nil
         }
     }

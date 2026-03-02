@@ -30,6 +30,7 @@ struct ChatView: View {
     @State private var showSearch = false
     @State private var scrollToMessageIndex: Int?
     @State private var highlightedMessageIndex: Int?
+    @State private var currentSearchText: String?
     
     // Channel Recommendations
     @State private var recommender = ChannelRecommender()
@@ -39,10 +40,82 @@ struct ChatView: View {
     @State private var recommendationError: String?
     @State private var showRecommendationError = false
     
+    // Smart Reply Suggestions (NEW macOS 26 AI Feature)
+    @State private var smartReplyGenerator = SmartReplyGenerator()
+    @State private var showSmartReplies = false
+    @State private var isGeneratingSmartReplies = false
+    @State private var smartReplyTriggerTask: Task<Void, Never>?
+    
     private var settings: AppSettings { AppSettings.shared }
     
     private var commandHandler: IRCCommandHandler {
         IRCCommandHandler(connection: channel.server.connection, chatState: chatState)
+    }
+    
+    /// Main message area with header, messages, smart replies, and input
+    private var messageAreaView: some View {
+        VStack(spacing: 0) {
+            // Channel header with Liquid Glass
+            ChannelHeaderView(channel: channel)
+                .padding(12)
+                .glassEffect(.regular.tint(.blue.opacity(0.15)), 
+                            in: .rect(cornerRadius: 12))
+                .glassEffectID("header", in: glassNamespace)
+                .padding(.horizontal, 12)
+                .padding(.top, showSearch ? 0 : 12)
+            
+            // Message list with Liquid Glass
+            MessageListView(
+                channel: channel,
+                scrollToMessageIndex: $scrollToMessageIndex,
+                highlightedMessageIndex: $highlightedMessageIndex,
+                searchText: currentSearchText
+            )
+            .glassEffect(.regular, in: .rect(cornerRadius: 12))
+            .glassEffectID("messages", in: glassNamespace)
+            .padding(12)
+            
+            // Smart Reply Suggestions (NEW macOS 26 AI Feature)
+            // Only show if there are actual suggestions, no loading indicator to avoid distraction
+            if showSmartReplies && !smartReplyGenerator.suggestions.isEmpty {
+                SmartReplyView(
+                    suggestions: smartReplyGenerator.suggestions,
+                    onSelect: { reply in
+                        selectSmartReply(reply)
+                    },
+                    onDismiss: {
+                        withAnimation(.spring(duration: 0.3)) {
+                            showSmartReplies = false
+                        }
+                    }
+                )
+                .padding(.horizontal, 12)
+                .glassEffectID("smartreplies", in: glassNamespace)
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+            
+            // Message input with interactive Liquid Glass
+            MessageInputView(
+                messageText: $messageText,
+                messageHistory: messageHistory,
+                historyIndex: $historyIndex,
+                onSend: {
+                    sendMessage()
+                },
+                users: channel.users
+            )
+            .padding(12)
+            .glassEffect(.regular.interactive(), 
+                        in: .rect(cornerRadius: 20))
+            .glassEffectID("input", in: glassNamespace)
+            .padding(12)
+            .onChange(of: channel.messages.count) { oldCount, newCount in
+                // Auto-trigger smart replies when new messages arrive
+                if newCount > oldCount {
+                    handleNewMessagesAdded()
+                }
+            }
+        }
     }
     
     var body: some View {
@@ -51,7 +124,7 @@ struct ChatView: View {
             VStack(spacing: 0) {
                 // Search bar at top (morphs in/out)
                 if showSearch {
-                    ChatSearchView(channel: channel, isPresented: $showSearch)
+                    ChatSearchView(channel: channel, isPresented: $showSearch, currentSearchText: $currentSearchText)
                         .padding(.horizontal, 12)
                         .padding(.top, 12)
                         .glassEffectID("search", in: glassNamespace)
@@ -60,42 +133,7 @@ struct ChatView: View {
                 
                 HStack(spacing: 0) {
                     // Main message area
-                    VStack(spacing: 0) {
-                        // Channel header with Liquid Glass
-                        ChannelHeaderView(channel: channel)
-                            .padding(12)
-                            .glassEffect(.regular.tint(.blue.opacity(0.15)), 
-                                        in: .rect(cornerRadius: 12))
-                            .glassEffectID("header", in: glassNamespace)
-                            .padding(.horizontal, 12)
-                            .padding(.top, showSearch ? 0 : 12)
-                        
-                        // Message list with Liquid Glass
-                        MessageListView(
-                            channel: channel,
-                            scrollToMessageIndex: $scrollToMessageIndex,
-                            highlightedMessageIndex: $highlightedMessageIndex
-                        )
-                        .glassEffect(.regular, in: .rect(cornerRadius: 12))
-                        .glassEffectID("messages", in: glassNamespace)
-                        .padding(12)
-                        
-                        // Message input with interactive Liquid Glass
-                        MessageInputView(
-                            messageText: $messageText,
-                            messageHistory: messageHistory,
-                            historyIndex: $historyIndex,
-                            onSend: {
-                                sendMessage()
-                            },
-                            users: channel.users
-                        )
-                        .padding(12)
-                        .glassEffect(.regular.interactive(), 
-                                    in: .rect(cornerRadius: 20))
-                        .glassEffectID("input", in: glassNamespace)
-                        .padding(12)
-                    }
+                    messageAreaView
                     
                     // User list sidebar with morphing transition
                     if showUserList {
@@ -122,34 +160,35 @@ struct ChatView: View {
             Text("This message contains \(messageText.components(separatedBy: .newlines).count) lines. Consider using a pastebin service for large blocks of text.")
         }
         .toolbar {
-            ToolbarItem(placement: .primaryAction) {
+            ToolbarItemGroup(placement: .primaryAction) {
+                // Search button with glass icon style
                 Button {
                     withAnimation(.spring(duration: 0.3)) {
                         showSearch.toggle()
                     }
                 } label: {
-                    Label("Search", systemImage: "magnifyingglass")
+                    Image(systemName: "magnifyingglass")
                 }
-                .buttonStyle(.glass)
-                .help("Search in conversation (Cmd+F)")
+                .buttonStyle(.glassIcon(isActive: showSearch))
+                .help("Search in conversation (⌘F)")
                 .keyboardShortcut("f", modifiers: .command)
-            }
-            
-            ToolbarItem(placement: .primaryAction) {
+                
+                // User list toggle with glass icon style
                 Button {
-                    withAnimation(.spring) {
+                    withAnimation(.spring(duration: 0.3)) {
                         showUserList.toggle()
                     }
                 } label: {
-                    Label(
-                        showUserList ? "Hide Users" : "Show Users",
-                        systemImage: "person.2"
-                    )
+                    Image(systemName: showUserList ? "person.2.fill" : "person.2")
                 }
-                .buttonStyle(.glass)
-            }
-            
-            ToolbarItem(placement: .primaryAction) {
+                .buttonStyle(.glassIcon(isActive: showUserList))
+                .help(showUserList ? "Hide user list" : "Show user list")
+                
+                Divider()
+                    .frame(height: 24)
+                    .padding(.horizontal, 4)
+                
+                // AI Summarize button with enhanced glass style
                 Button {
                     generateSummary()
                 } label: {
@@ -160,18 +199,22 @@ struct ChatView: View {
                             Text("Summarizing...")
                                 .font(.caption)
                         }
+                        .foregroundStyle(.white)
                     } else {
                         Label("Summarize", systemImage: "sparkles")
                     }
                 }
-                .buttonStyle(.glass)
+                .buttonStyle(.glassToolbar(
+                    isActive: isSummarizing,
+                    isDisabled: !summarizer.isAvailable || channel.messages.isEmpty
+                ))
                 .disabled(isSummarizing || !summarizer.isAvailable || channel.messages.isEmpty)
                 .help(summarizer.isAvailable 
-                      ? "Generate AI summary of conversation" 
+                      ? "Generate AI summary of conversation (⌘S)" 
                       : "AI features require macOS 26+ with Apple Intelligence")
-            }
-            
-            ToolbarItem(placement: .primaryAction) {
+                .keyboardShortcut("s", modifiers: [.command, .shift])
+                
+                // Channel Recommendations button with enhanced glass style
                 Button {
                     generateRecommendations()
                 } label: {
@@ -182,16 +225,21 @@ struct ChatView: View {
                             Text("Finding...")
                                 .font(.caption)
                         }
+                        .foregroundStyle(.white)
                     } else {
                         Label("Recommend", systemImage: "sparkles.rectangle.stack")
                     }
                 }
-                .buttonStyle(.glass)
+                .buttonStyle(.glassToolbar(
+                    isActive: isGeneratingRecommendations,
+                    isDisabled: !AppSettings.shared.enableAIFeatures || channel.messages.isEmpty || channel.server.availableChannels.isEmpty
+                ))
                 .disabled(isGeneratingRecommendations || !AppSettings.shared.enableAIFeatures || 
                          channel.messages.isEmpty || channel.server.availableChannels.isEmpty)
                 .help(AppSettings.shared.enableAIFeatures
-                      ? "Get AI-powered channel recommendations"
+                      ? "Get AI-powered channel recommendations (⌘R)"
                       : "AI features require macOS 26+ with Apple Intelligence")
+                .keyboardShortcut("r", modifiers: [.command, .shift])
             }
         }
         .sheet(isPresented: $showingSummary) {
@@ -235,6 +283,83 @@ struct ChatView: View {
         }
     }
     
+    // MARK: - Smart Reply Methods (NEW macOS 26 AI Feature)
+    
+    /// Handles new messages arriving and triggers smart reply generation
+    /// Uses intelligent debouncing to avoid excessive AI calls
+    private func handleNewMessagesAdded() {
+        // Only trigger if we're not already processing and AI is enabled
+        guard !isGeneratingSmartReplies,
+              AppSettings.shared.enableAIFeatures,
+              AppSettings.shared.enableSmartReplies else {
+            return
+        }
+        
+        // Check if there are recent messages from others (not from us)
+        guard let connection = channel.server.connection else { return }
+        let recentMessagesFromOthers = channel.messages.suffix(5).filter { 
+            $0.sender != connection.currentNickname && $0.type == .message 
+        }
+        
+        // Only generate if there's at least one message from someone else
+        guard !recentMessagesFromOthers.isEmpty else {
+            return
+        }
+        
+        // Cancel existing task and debounce
+        smartReplyTriggerTask?.cancel()
+        smartReplyTriggerTask = Task {
+            try? await Task.sleep(for: .seconds(1.5)) // Debounce 1.5 seconds
+            guard !Task.isCancelled else { return }
+            await generateSmartReplies()
+        }
+    }
+    
+    /// Generates smart reply suggestions using Apple Intelligence
+    private func generateSmartReplies() async {
+        guard let connection = channel.server.connection else { return }
+        
+        isGeneratingSmartReplies = true
+        
+        do {
+            let replies = try await smartReplyGenerator.generateReplies(
+                basedOn: channel.messages,
+                currentNickname: connection.currentNickname
+            )
+            
+            await MainActor.run {
+                withAnimation(.spring(duration: 0.4)) {
+                    isGeneratingSmartReplies = false
+                    if !replies.isEmpty {
+                        showSmartReplies = true
+                    }
+                }
+            }
+        } catch {
+            await MainActor.run {
+                isGeneratingSmartReplies = false
+            }
+            await ConsoleLogger.shared.log("Smart reply generation failed: \(error.localizedDescription)", level: .debug, category: "AI")
+        }
+    }
+    
+    /// Handles selection of a smart reply
+    private func selectSmartReply(_ reply: SmartReply) {
+        withAnimation(.spring(duration: 0.3)) {
+            messageText = reply.text
+            showSmartReplies = false
+        }
+        
+        // Optional: Auto-send the reply
+        if AppSettings.shared.autoSendSmartReplies {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                sendMessage()
+            }
+        }
+    }
+    
+    // MARK: - Message Sending
+    
     private func sendMessage() {
         guard !messageText.trimmingCharacters(in: .whitespaces).isEmpty else { return }
         
@@ -273,25 +398,37 @@ struct ChatView: View {
         isSummarizing = true
         summaryError = nil
         
-        Task { @MainActor in
+        Task {
             do {
-                currentSummary = try await summarizer.summarize(messages: channel.messages)
-                showingSummary = true
-            } catch let error as CatchUpSummarizer.SummarizerError {
-                switch error {
-                case .featuresDisabled:
-                    summaryError = "AI features are disabled. Enable them in Settings > Advanced > AI Features."
-                case .modelUnavailable:
-                    summaryError = "AI model is unavailable. This feature requires macOS 26+ with Apple Intelligence enabled."
-                case .noMessages:
-                    summaryError = "No messages to summarize."
+                // Perform AI work off the main thread
+                let summary = try await summarizer.summarize(messages: channel.messages)
+                
+                // Update UI on main thread
+                await MainActor.run {
+                    currentSummary = summary
+                    showingSummary = true
+                    isSummarizing = false
                 }
-                showSummaryError = true
+            } catch let error as CatchUpSummarizer.SummarizerError {
+                await MainActor.run {
+                    switch error {
+                    case .featuresDisabled:
+                        summaryError = "AI features are disabled. Enable them in Settings > Advanced > AI Features."
+                    case .modelUnavailable:
+                        summaryError = "AI model is unavailable. This feature requires macOS 26+ with Apple Intelligence enabled."
+                    case .noMessages:
+                        summaryError = "No messages to summarize."
+                    }
+                    showSummaryError = true
+                    isSummarizing = false
+                }
             } catch {
-                summaryError = "Failed to generate summary: \(error.localizedDescription)"
-                showSummaryError = true
+                await MainActor.run {
+                    summaryError = "Failed to generate summary: \(error.localizedDescription)"
+                    showSummaryError = true
+                    isSummarizing = false
+                }
             }
-            isSummarizing = false
         }
     }
     
@@ -302,33 +439,46 @@ struct ChatView: View {
         isGeneratingRecommendations = true
         recommendationError = nil
         
-        Task { @MainActor in
+        Task {
             do {
-                currentRecommendations = try await recommender.recommend(
+                // Perform AI work off the main thread
+                let recommendations = try await recommender.recommend(
                     basedOn: channel.messages,
                     from: channel.server.availableChannels,
                     excluding: channel.name
                 )
                 
-                if currentRecommendations.isEmpty {
-                    recommendationError = "No relevant channels found. Try /list to see all available channels."
-                    showRecommendationError = true
-                } else {
-                    showingRecommendations = true
-                    ConsoleLogger.shared.log(
-                        "Generated \(currentRecommendations.count) channel recommendations",
-                        level: .info,
-                        category: "AI"
-                    )
+                // Update UI on main thread
+                await MainActor.run {
+                    currentRecommendations = recommendations
+                    
+                    if recommendations.isEmpty {
+                        recommendationError = "No relevant channels found. Try /list to see all available channels."
+                        showRecommendationError = true
+                    } else {
+                        showingRecommendations = true
+                    }
+                    isGeneratingRecommendations = false
                 }
+                
+                await ConsoleLogger.shared.log(
+                    "Generated \(recommendations.count) channel recommendations",
+                    level: .info,
+                    category: "AI"
+                )
             } catch let error as RecommenderError {
-                recommendationError = error.localizedDescription
-                showRecommendationError = true
+                await MainActor.run {
+                    recommendationError = error.localizedDescription
+                    showRecommendationError = true
+                    isGeneratingRecommendations = false
+                }
             } catch {
-                recommendationError = "Failed to generate recommendations: \(error.localizedDescription)"
-                showRecommendationError = true
+                await MainActor.run {
+                    recommendationError = "Failed to generate recommendations: \(error.localizedDescription)"
+                    showRecommendationError = true
+                    isGeneratingRecommendations = false
+                }
             }
-            isGeneratingRecommendations = false
         }
     }
 }
