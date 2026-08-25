@@ -2,534 +2,171 @@
 
 ## Status Overview
 
-### ✅ Already Implemented
-1. **Basic IRC Protocol (RFC 1459)**
-   - Connection management with Network.framework
-   - NICK, USER, PASS commands
-   - JOIN, PART, PRIVMSG, NOTICE
-   - PING/PONG automatic handling
-   - TLS/SSL support (default port 6697)
-   - Message parsing and routing
+### ✅ Implemented
 
-2. **SASL Authentication**
-   - SASL PLAIN mechanism
-   - Capability negotiation (CAP LS 302)
-   - CAP REQ/ACK handling
-   - AUTHENTICATE chunking for large payloads
+1. **IRC Protocol (RFC 1459 / 2812)**
+   - Connection management with Network.framework, TLS by default (6697)
+   - Full registration handshake (CAP LS 302 → PASS/NICK/USER → CAP END)
+   - RFC-validated message parser (`IRC/IRCMessage.swift`): commands must be
+     letters or 3-digit numerics; bare commands, empty trailing params, and
+     trailing-whitespace preservation are all covered by `IRCParserTests`
+   - Outgoing sanitization: CR/LF stripped from parameters; `sendMessage`
+     splits multiline/oversized text into ≤510-byte PRIVMSGs per line
+   - PING/PONG both directions: server PINGs answered (bare PING included);
+     client-side keepalive PINGs after 60s idle, unanswered-for-120s marks
+     the connection dead (`IRC.pingInterval` / `IRC.pingTimeout`); round-trip
+     lag surfaced as `IRCConnection.lastLagMs` and shown in the sidebar
+   - EOF and receive errors tear the socket down so reconnect logic runs
+   - Latin-1 fallback for non-UTF-8 lines; 1MB receive-buffer cap
 
-3. **Multi-Network Support**
-   - Multiple concurrent server connections
-   - NavigationSplitView architecture
-   - Per-server channel management
+2. **IRCv3**
+   - Capabilities requested when advertised: `multi-prefix`, `server-time`,
+     `message-tags`, `batch`, `sasl`, `znc.in/playback`,
+     `soju.im/bouncer-networks`(+`-notify`)
+   - Multiline `CAP LS 302` accumulation (values like `sasl=PLAIN` handled)
+   - Message tags parsed with spec unescaping (`\:` `\s` `\\` `\r` `\n`)
+   - server-time drives message timestamps; batches buffered (2000-message
+     cap, flushed on disconnect) and rendered with a "replayed history" rule
+   - SASL PLAIN (with 400-byte AUTHENTICATE chunking) and SASL EXTERNAL
+     (presents a Keychain client identity as the TLS local identity;
+     configured per-server via `clientCertificateName`)
+   - SASL numerics: 900/903 success, 902/904–908 failure/abort
+   - RPL_ISUPPORT (005) negotiation (`Models/IRCISupport.swift`): PREFIX,
+     CHANMODES A/B/C/D argument categories, CHANTYPES, CASEMAPPING
+     (rfc1459 + ascii), NETWORK — drives NAMES prefix parsing, MODE argument
+     consumption, channel-vs-query detection, and name folding
 
-4. **Core UI Features**
-   - Liquid Glass design system integration
-   - Channel sidebar with server/channel hierarchy
-   - Message list with virtualized scrolling (LazyVStack)
-   - User list with mode indicators (@, +, etc.)
-   - Private message support
+3. **Bouncers**
+   - ZNC: `*status`/`*playback` pseudo-users routed to console channels;
+     playback requested after 001 (never pre-registration)
+   - Soju `bouncer-networks`: controller connection lists networks
+     (`BOUNCER LISTNETWORKS`), sidebar shows them with upstream-state dots,
+     "Open" spawns a bound connection that sends `BOUNCER BIND <netid>`
+     during registration (`Models/BouncerNetwork.swift`)
 
-5. **State Management**
-   - @Observable macro for reactive updates
-   - ChatState managing servers and channels
-   - IRCConnection delegate pattern
-   - Connection state tracking
+4. **State & correctness invariants** (`Models/ChatState.swift`)
+   - All channel/nick lookups use the server's casemapping
+     (`IRCISupport.fold`, `IRCServer.channel(named:)`,
+     `IRCChannel.userIndex(named:)`) — never compare names with `==`
+   - `currentNickname` is authoritative from 001 / NICK echoes only;
+     433 retries track `attemptedNickname` separately
+   - NAMES bursts replace the user list (first 353 clears, 366 ends);
+     prefix symbols map to mode letters so `@`/`+`/`~`/`&`/`%` display
+   - CTCP: incoming ACTION rendered as action; VERSION/PING answered
+   - NOTICE routed like PRIVMSG (server notices → server console channel)
+   - Reconnect: exponential backoff 5s→300s that survives failed attempts,
+     single-scheduled, skipped after manual disconnect (`/quit` counts as
+     manual); instant reconnect on wake-from-sleep and network restoration
+     (`startSystemMonitors`)
+   - Old connections are torn down before replacement (no socket leaks)
 
-6. **Message Types**
-   - Regular messages (.message)
-   - Actions (/me commands) (.action)
-   - System messages (.system)
-   - JOIN/PART/QUIT events
-   - NICK changes
-   - TOPIC updates
+5. **UI/UX**
+   - Liquid Glass design system; NavigationSplitView; user list with full
+     prefix ladder; per-conversation unread + mention badges
+   - Tab completion that cycles matches on repeated Tab (colon only at
+     line start); ⌘K clear; ⌥⌘↑/↓ channel navigation; ⌥⌘U next unread;
+     ⌘T join; ⌘N new connection (Channel menu in `Liquid_ChatApp.swift`)
+   - Message list: O(n) grouping with O(1) row lookups, collapsed status
+     events, auto-scroll only while pinned to bottom
+   - Text pipeline: mIRC formatting codes stripped and URLs linkified once
+     at ingest (`IRCTextFormatter`); word-boundary mention detection
+     (`String.containsNick`)
+   - URL previews: opt-in-able setting, 512KB/HTML-only cap, in-flight
+     dedup, LRU cache
+   - Notifications: suppressed only when the channel is visible AND the app
+     is active; click focuses the channel; inline Reply action sends from
+     the banner; grouped per conversation; permission requested lazily
+     (`Utilities/NotificationManager.swift`)
+   - Dock badge: unread DMs + channels with mentions
+   - App termination sends QUIT everywhere and closes log handles
+     (`AppDelegate` in `Liquid_ChatApp.swift`)
 
-## 🚧 Required Implementations
+6. **Persistence & automation**
+   - `ChannelLogger` actor: per-day log files under Application Support,
+     stale-handle recovery, handles closed on quit; both sent and received
+     messages logged
+   - `ServerConfigManager` (@MainActor): saved servers in UserDefaults,
+     passwords in Keychain (`KeychainManager`), auto-connect on launch
+   - `IRCCommandHandler`: /join /part /topic /whois /msg /me /notice
+     /mode /op /voice /kick /ban /nick /quit /away /list /names /clear …
 
-### 1. Protocol & Security Enhancements
+7. **AI features (macOS 26 Apple Intelligence)**
+   - Catch-up summarizer, channel recommender, smart replies
 
-#### SASL EXTERNAL Mechanism
-**Status:** Not implemented  
-**Priority:** High  
-**Location:** `IRC/IRCConnection.swift`
+### 🚧 Remaining Work
 
-**Implementation:**
-- Add `.external` case to `IRCAuthMethod`
-- Implement SASL EXTERNAL in `handleAuthenticateResponse()`
-- Use client certificate for authentication
-- Update `IRCServerConfig` to support certificate paths
+1. **DCC file transfers** — not started; design the security model first
+   (explicit accept, no auto-accept, sanitized filenames, size caps)
+2. **Soju network management** — ADDNETWORK/CHANGENETWORK/DELNETWORK UI
+   (discovery + BIND are done)
+3. **TextKit 2 message view** — only needed for >10k-message flood
+   scenarios; ingest-time caching covers normal use (the `NSTextLayoutView`
+   stub in MessageListView is unused)
+4. **Certificate pinning / custom CA options** for TLS
+5. **iOS/iPadOS adaptation, CloudKit sync, widgets, Shortcuts**
 
-**Code snippet:**
-```swift
-case .external:
-    // SASL EXTERNAL uses empty response
-    send(command: "AUTHENTICATE", parameters: ["+"])
+## Testing
+
+Run the suite (needs Xcode; use DEVELOPER_DIR if xcode-select points at CLT):
+
+```bash
+DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer xcodebuild test -project "Liquid Chat.xcodeproj" -scheme "Liquid Chat" -destination 'platform=macOS' -only-testing:"Liquid ChatTests" CODE_SIGN_IDENTITY="-" CODE_SIGNING_REQUIRED=NO DEVELOPMENT_TEAM=
 ```
 
-#### IRCv3 Capability Negotiation
-**Status:** Partially implemented (CAP LS 302 only)  
-**Priority:** High  
-**Location:** `IRC/IRCConnection.swift`
+163 tests across parser, ISUPPORT, casemapping/mention semantics, bouncer
+attributes, connection integration (MockIRCConnection), settings, and
+server persistence. Conventions learned the hard way:
 
-**Required Capabilities:**
-- `multi-prefix` - Multiple mode prefixes (@+user)
-- `server-time` - Accurate message timestamps
-- `message-tags` - Extended message metadata
-- `batch` - Grouped message delivery
+- `AppSettingsTests` and `ServerConfigManagerTests` are `.serialized` —
+  they share a UserDefaults domain that each test's `init()` clears
+- Never assert with `array[0]` in tests — a trap kills the shared test
+  host and cascades "Crash" failures onto unrelated tests; use `first?`
+- `IRCMessage.format` always colon-prefixes the trailing parameter
+- Theme rawValues are capitalized ("Dark", not "dark")
 
-**Implementation:**
-```swift
-// In handleCapabilityResponse()
-let requestedCaps: [String] = [
-    "multi-prefix",
-    "server-time", 
-    "message-tags",
-    "batch",
-    "sasl" // if needed
-]
-```
+### Manual testing still worth doing
+- [ ] Live connect to Libera.Chat (SASL PLAIN + EXTERNAL)
+- [ ] ZNC playback and Soju BIND against real bouncers
+- [ ] Sleep/wake and Wi-Fi-switch reconnect behavior
+- [ ] Notification reply while app is quit… backgrounded
+- [ ] 1000+ message channels for scroll performance
 
-**Impact:**
-- Update `IRCMessage.swift` to parse message tags
-- Add timestamp handling from `@time=` tag
-- Support batch START/END commands
-- Parse multiple mode prefixes in NAMES replies
+## Architecture Notes
 
-#### Enhanced TLS Configuration
-**Status:** Basic TLS implemented  
-**Priority:** Medium  
-**Location:** `IRC/IRCConnection.swift`
+### Threading model (do not regress)
+- `IRCConnection` protocol state (`receiveBuffer`, CAP state, batches,
+  keepalive, `attemptedNickname`) is owned by `receiveQueue`; UI-facing
+  properties (`state`, `currentNickname`, `lastLagMs`,
+  `supportsBouncerNetworks`) are mutated only via main-thread hops
+- The CAP timeout and keepalive timers run on `receiveQueue`, never a
+  global queue
+- `ChatState` is `@MainActor`; delegate callbacks hop via `Task { @MainActor }`
+- Project uses `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor` (Swift 5 mode)
 
-**Improvements:**
-- Verify server certificates by default
-- Support custom CA certificates
-- Add certificate pinning option
-- Display TLS version and cipher in UI
+### IRC protocol quirks encoded in the implementation
+- Channel names can start with # & (and per-005 CHANTYPES); nicknames can
+  contain `[]{}\|^`-` — always compare via `IRCISupport.fold`
+- Casemapping rfc1459: `[]\^` are uppercase of `{}|~`
+- ZNC PASS format: `user/network:password`
+- `BOUNCER BIND` must be sent during registration (after CAP ACK, before
+  CAP END completes registration)
+- PRIVMSG to ZNC modules is rejected before 001
+- A 400-byte-exact SASL payload needs a trailing `AUTHENTICATE +`
 
-### 2. Bouncer Support
-
-#### ZNC Bouncer Integration
-**Status:** Not implemented  
-**Priority:** High  
-**Location:** `IRC/IRCConnection.swift`
-
-**Features:**
-- Support `PASS host:port:password` format
-- Request `znc.in/playback` capability
-- Handle ZNC-specific commands:
-  - `*playback PLAY * 0` - Request full history
-  - `*status` - Check ZNC status
-- Parse ZNC module messages
-
-**Implementation:**
-```swift
-// In performIRCHandshake()
-if let password = config.password, config.authMethod == .password {
-    // Check if password contains ZNC bouncer format
-    if password.contains(":") {
-        // Format: user/network:password or host:port:password
-        send(command: "PASS", parameters: [password])
-    }
-}
-
-// In handleCapabilityResponse()
-if caps.contains("znc.in/playback") {
-    requestedCaps.append("znc.in/playback")
-}
-```
-
-#### Soju Bouncer Support
-**Status:** Not implemented  
-**Priority:** Medium  
-**Location:** `IRC/IRCConnection.swift`
-
-**Features:**
-- Support `BOUNCER BIND` command
-- Handle `soju.im/bouncer-networks` capability
-- Network switching within single connection
-- Persistent message history
-
-### 3. UI/UX Enhancements
-
-#### Tab Completion for Nicknames
-**Status:** Not implemented  
-**Priority:** High  
-**Location:** `Views/ChatView.swift`
-
-**Implementation:**
-- Detect Tab key press in TextField
-- Match current word against channel user list
-- Cycle through matches on repeated Tab
-- Add colon after nick if at start of line
-
-**Pseudocode:**
-```swift
-.onKeyPress(.tab) { keyPress in
-    let currentWord = extractCurrentWord()
-    let matches = channel.users.filter { 
-        $0.nickname.hasPrefix(currentWord) 
-    }
-    if let match = matches.first {
-        replaceCurrentWord(with: match.nickname)
-    }
-    return .handled
-}
-```
-
-#### Pastebin Trigger
-**Status:** Not implemented  
-**Priority:** Medium  
-**Location:** `Views/ChatView.swift`
-
-**Features:**
-- Detect when message contains 5+ newlines
-- Show alert: "This message is large. Upload to pastebin?"
-- Options: [Send Anyway] [Upload to Pastebin] [Cancel]
-- Support pastebin.com or custom service
-
-**Implementation:**
-```swift
-func sendMessage() {
-    let lineCount = messageText.components(separatedBy: "\n").count
-    if lineCount >= 5 {
-        showPastebinPrompt = true
-        return
-    }
-    // Normal send...
-}
-```
-
-#### Inline Image Preview
-**Status:** Not implemented  
-**Priority:** Medium  
-**Location:** `Views/MessageListView.swift`
-
-**Features:**
-- Detect URLs in messages (http, https)
-- Fetch URL metadata (title, description, image)
-- Display thumbnail inline with message
-- Click to open in browser or expand
-- Support: images (jpg, png, gif), videos (youtube), links
-
-**Implementation:**
-```swift
-// New file: Utilities/URLPreviewFetcher.swift
-actor URLPreviewFetcher {
-    func fetchPreview(for url: URL) async -> URLPreview? {
-        // Fetch HTML, parse <meta> tags
-        // Return title, description, imageURL
-    }
-}
-
-// In MessageListView:
-if let url = extractFirstURL(from: message.content) {
-    AsyncImage(url: url) { image in
-        image.resizable().aspectRatio(contentMode: .fit)
-    }
-}
-```
-
-#### Nicklist Context Menu
-**Status:** Partially implemented (user list exists)  
-**Priority:** Medium  
-**Location:** `Views/ChatView.swift`
-
-**Features:**
-- Right-click user in nicklist
-- Actions:
-  - **Whois** - Show user information
-  - **Query** - Open private message
-  - **Ignore** - Hide messages from user
-  - **Op/Deop** - Change user modes (if you're op)
-  - **Kick/Ban** - Moderation actions
-
-**Implementation:**
-```swift
-// In user list ForEach:
-.contextMenu {
-    Button("Whois \(user.nickname)") {
-        connection.send(command: "WHOIS", parameters: [user.nickname])
-    }
-    Button("Send Message") {
-        chatState.openPrivateMessage(with: user.nickname, on: server)
-    }
-    Button("Ignore") {
-        ignoreList.add(user.nickname)
-    }
-}
-```
-
-### 4. Automation & Persistence
-
-#### Background Logging Actor
-**Status:** Not implemented  
-**Priority:** High  
-**Location:** New file `Utilities/ChannelLogger.swift`
-
-**Features:**
-- Log all channel messages to local files
-- Organize logs: `~/Library/Application Support/Liquid Chat/Logs/{server}/{channel}/`
-- File format: `YYYY-MM-DD.log`
-- Include timestamps and user prefixes
-- Run in background without blocking UI
-
-**Implementation:**
-```swift
-actor ChannelLogger {
-    private let baseURL: URL
-    
-    init() {
-        baseURL = FileManager.default
-            .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("Liquid Chat/Logs")
-    }
-    
-    func log(message: IRCChatMessage, channel: String, server: String) async {
-        let dateFormatter = DateFormatter()
-        dateFormatter.dateFormat = "yyyy-MM-dd"
-        let filename = dateFormatter.string(from: message.timestamp)
-        
-        let logURL = baseURL
-            .appendingPathComponent(server)
-            .appendingPathComponent(channel)
-            .appendingPathComponent("\(filename).log")
-        
-        // Ensure directory exists
-        try? FileManager.default.createDirectory(
-            at: logURL.deletingLastPathComponent(),
-            withIntermediateDirectories: true
-        )
-        
-        // Append message
-        let logLine = "[\(message.timestamp)] <\(message.sender)> \(message.content)\n"
-        if let data = logLine.data(using: .utf8) {
-            if FileManager.default.fileExists(atPath: logURL.path) {
-                let fileHandle = try? FileHandle(forWritingTo: logURL)
-                fileHandle?.seekToEndOfFile()
-                fileHandle?.write(data)
-                fileHandle?.closeFile()
-            } else {
-                try? data.write(to: logURL)
-            }
-        }
-    }
-}
-```
-
-**Integration:**
-```swift
-// In ChatState.handlePrivMsg():
-Task {
-    await ChannelLogger.shared.log(
-        message: chatMessage,
-        channel: channelName,
-        server: server.config.hostname
-    )
-}
-```
-
-#### Persistent Server Configuration
-**Status:** Partially implemented (ServerConfigManager exists)  
-**Priority:** Medium  
-**Location:** `Models/ServerConfigManager.swift`
-
-**Enhancements:**
-- Save auto-connect servers
-- Restore channels on reconnect
-- Store server-specific settings (encoding, etc.)
-- Import/export server configurations
-
-### 5. Protocol Extensions
-
-#### IRCMessage Enhancement
-**Status:** Basic parsing implemented  
-**Priority:** High  
-**Location:** `IRC/IRCMessage.swift`
-
-**Add Support For:**
-```swift
-struct IRCMessage {
-    let prefix: String?
-    let command: String
-    let parameters: [String]
-    
-    // NEW: IRCv3 message tags
-    let tags: [String: String]  // @time=2024-01-01T12:00:00.000Z
-    
-    // NEW: Parsed timestamp from server-time
-    var serverTime: Date? {
-        if let timeTag = tags["time"] {
-            return ISO8601DateFormatter().date(from: timeTag)
-        }
-        return nil
-    }
-}
-```
-
-#### Command Handler
-**Status:** Not implemented  
-**Priority:** Medium  
-**Location:** New file `IRC/IRCCommandHandler.swift`
-
-**Features:**
-- Parse user input commands (/join, /part, /quit, /me, etc.)
-- Handle client-side commands (/clear, /help)
-- Support command aliases
-- Show command help
-
-**Implementation:**
-```swift
-class IRCCommandHandler {
-    func handleCommand(_ input: String, connection: IRCConnection) {
-        guard input.hasPrefix("/") else {
-            // Regular message
-            return
-        }
-        
-        let parts = input.dropFirst().split(separator: " ", maxSplits: 1)
-        let command = String(parts[0]).lowercased()
-        let args = parts.count > 1 ? String(parts[1]) : ""
-        
-        switch command {
-        case "join":
-            connection.join(channel: args)
-        case "part":
-            connection.part(channel: args)
-        case "me":
-            connection.send(command: "PRIVMSG", parameters: [channel, "\u{01}ACTION \(args)\u{01}"])
-        case "quit":
-            connection.disconnect(message: args)
-        default:
-            // Show error
-            break
-        }
-    }
-}
-```
-
-## Implementation Priority
-
-### Phase 1: Core Protocol Enhancements
-1. ✅ IRCv3 capabilities (multi-prefix, server-time, message-tags, batch)
-2. ✅ Enhanced IRCMessage with tag support
-3. ✅ SASL EXTERNAL mechanism
-4. ✅ ZNC bouncer support
-
-### Phase 2: UI/UX Features
-1. ✅ Tab completion for nicknames
-2. ✅ Nicklist context menu (Whois/Ignore)
-3. ✅ Pastebin trigger
-4. ✅ Inline image preview
-
-### Phase 3: Automation & Persistence
-1. ✅ Background logging actor
-2. ✅ Enhanced server configuration
-3. ✅ Auto-reconnect logic
-4. ✅ Command handler
-
-### Phase 4: Advanced Features
-1. ⏳ Soju bouncer support
-2. ⏳ DCC file transfers
-3. ⏳ Custom themes
-4. ⏳ Notification system
-
-## Testing Checklist
-
-### Connection Testing
-- [ ] Connect to standard IRC server (Libera.Chat)
-- [ ] Connect via SSL/TLS
-- [ ] SASL PLAIN authentication
-- [ ] SASL EXTERNAL authentication (with certificate)
-- [ ] Connect through ZNC bouncer
-- [ ] Reconnect after disconnect
-- [ ] Handle nickname conflicts
-
-### Protocol Testing
-- [ ] Send/receive PRIVMSG
-- [ ] JOIN/PART channels
-- [ ] NAMES list parsing with multi-prefix
-- [ ] TOPIC display and changes
-- [ ] MODE changes (op/voice)
-- [ ] KICK/BAN handling
-- [ ] NICK changes
-- [ ] QUIT messages
-
-### IRCv3 Testing
-- [ ] server-time timestamps display correctly
-- [ ] message-tags parsed properly
-- [ ] batch messages grouped correctly
-- [ ] multi-prefix shows all modes (@+user)
-
-### UI Testing
-- [ ] Tab completion cycles through nicks
-- [ ] Pastebin prompt appears for 5+ lines
-- [ ] Image URLs show thumbnails
-- [ ] Context menu actions work
-- [ ] Liquid Glass effects perform well
-- [ ] Scrolling is smooth with 1000+ messages
-
-### Persistence Testing
-- [ ] Logs written to correct location
-- [ ] Server configs saved and restored
-- [ ] Auto-connect servers reconnect on launch
-- [ ] Channel list preserved across sessions
-
-## Technical Debt
-
-### Current Issues
-1. **Error Handling:** Need better error recovery for network failures
-2. **Memory Management:** Large message histories may consume memory
-3. **Performance:** Image preview fetching should be rate-limited
-4. **Accessibility:** VoiceOver support needs improvement
-5. **Localization:** UI strings should be localized
-
-### Future Improvements
-1. **SwiftData Migration:** Consider migrating from @Observable to SwiftData
-2. **CloudKit Sync:** Sync settings across devices
-3. **iOS Support:** Adapt UI for iPhone/iPad
-4. **Widgets:** Show recent messages in widgets
-5. **Shortcuts:** Siri shortcuts for sending messages
-
-## Resources
-
-### IRC Specifications
-- RFC 1459: Internet Relay Chat Protocol
-- RFC 2812: Internet Relay Chat: Client Protocol
-- IRCv3: https://ircv3.net/
-
-### Apple Documentation
-- Liquid Glass: https://developer.apple.com/documentation/TechnologyOverviews/liquid-glass
-- Network.framework: https://developer.apple.com/documentation/Network
-- SwiftUI: https://developer.apple.com/documentation/SwiftUI
-
-### Reference Implementations
-- HexChat: External/HexChat (included in project)
-- Textual: https://github.com/Codeux-Software/Textual
-- Irssi: https://github.com/irssi/irssi
-
-## Notes
-
-### Liquid Glass Best Practices
+### Liquid Glass best practices
 - Use `.glassEffect()` sparingly - only on functional elements
 - Test with Accessibility > Reduce Transparency enabled
 - Morphing containers need `.glassEffectID()` on all children
-- Interactive glass responds to touch/pointer automatically
 
-### IRC Protocol Quirks
-- Channel names can start with # & ! +
-- Nicknames can contain special chars: []{}\\|`^_-
-- MODE changes may come as individual events or batched
-- Some servers don't support IRCv3 capabilities
-- ZNC requires special PASS format: user/network:password
+## Resources
 
-### Performance Considerations
-- Use LazyVStack for message lists (already done)
-- Consider NSTextLayoutManager for very large histories
-- Cache URL preview metadata to avoid repeated fetches
-- Run background logging on separate actor (non-blocking)
-- Limit concurrent image preview downloads
+- RFC 1459 / RFC 2812; IRCv3: https://ircv3.net/
+- soju.im/bouncer-networks: https://soju.im/doc/bouncer-networks.html
+- Liquid Glass: https://developer.apple.com/documentation/TechnologyOverviews/liquid-glass
+- Reference clients: HexChat (External/HexChat), Textual, Irssi
 
 ---
 
-**Last Updated:** 2026-02-20  
-**Version:** 1.0  
+**Last Updated:** 2026-08-25
+**Version:** 2.0
 **Maintainer:** Claude Agent
