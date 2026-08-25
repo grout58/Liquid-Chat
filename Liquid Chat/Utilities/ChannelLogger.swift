@@ -208,4 +208,13 @@ actor ChannelLogger {
         let logDir = getLogDirectory(channel: channel, server: server)
         return FileManager.default.fileExists(atPath: logDir.path)
     }
+
+    /// Close every open file handle (call at app termination).
+    func closeAll() {
+        for handle in fileHandles.values {
+            try? handle.close()
+        }
+        fileHandles.removeAll()
+        lastAccessTime.removeAll()
+    }
 }

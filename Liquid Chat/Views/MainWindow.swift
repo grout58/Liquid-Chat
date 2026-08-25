@@ -8,7 +8,7 @@
 import SwiftUI
 
 struct MainWindow: View {
-    @State private var chatState = ChatState()
+    @Bindable var chatState: ChatState
     @State private var selectedChannel: IRCChannel?
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
     @State private var showConsole = false
@@ -74,6 +74,15 @@ struct MainWindow: View {
             ChannelJoinView(server: server, chatState: chatState)
                 .themedStyle(settings)
         }
+        .sheet(isPresented: $chatState.showingNewConnectionSheet) {
+            ServerConnectionView { config in
+                chatState.addServer(config: config)
+                if let server = chatState.servers.last {
+                    chatState.connectToServer(server)
+                }
+            }
+            .themedStyle(settings)
+        }
         .alert(item: $chatState.connectionAlert) { alert in
             Alert(
                 title: Text("Connection Failed"),
@@ -111,5 +120,5 @@ struct MainWindow: View {
 }
 
 #Preview {
-    MainWindow()
+    MainWindow(chatState: ChatState())
 }

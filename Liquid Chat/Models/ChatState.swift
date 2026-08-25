@@ -8,6 +8,7 @@
 import Foundation
 import SwiftUI
 import AppKit
+import Network
 import UserNotifications
 
 @MainActor
@@ -19,18 +20,29 @@ class ChatState: IRCConnectionDelegate {
     
     /// Currently selected channel for display. Marks the newly selected channel as read.
     var selectedChannel: IRCChannel? {
-        didSet { selectedChannel?.markRead() }
+        didSet {
+            selectedChannel?.markRead()
+            updateDockBadge()
+        }
     }
-    
+
     /// Server for which to show the channel join dialog
     var showingChannelJoinForServer: IRCServer?
-    
+
     /// Server for which to show the channel list view
     var showingChannelListForServer: IRCServer?
 
+    /// Whether the "New Connection…" sheet is showing (driven by the ⌘N menu command)
+    var showingNewConnectionSheet = false
+
     /// Pending connection error alert (server + message)
     var connectionAlert: ConnectionAlert?
-    
+
+    /// Network path monitor for reconnect-on-network-change
+    @ObservationIgnored private var pathMonitor: NWPathMonitor?
+    @ObservationIgnored private var lastPathWasSatisfied = true
+    @ObservationIgnored private var systemMonitorsStarted = false
+
     init() {
         // Initialize with empty state
     }
@@ -228,11 +240,17 @@ class ChatState: IRCConnectionDelegate {
     }
 
     /// Post a local notification if the user has granted permission.
-    private func sendNotification(title: String, body: String, identifier: String) {
+    /// server/channelName let the notification group by conversation, focus the
+    /// channel on click, and support inline reply.
+    private func sendNotification(title: String, body: String, identifier: String,
+                                  server: IRCServer, channelName: String) {
         let content = UNMutableNotificationContent()
         content.title = title
         content.body = body
         content.sound = AppSettings.shared.enableSoundNotifications ? .default : nil
+        content.categoryIdentifier = NotificationManager.messageCategoryID
+        content.threadIdentifier = "\(server.config.hostname)/\(channelName.ircCasemapped)"
+        content.userInfo = ["server": server.config.hostname, "channel": channelName]
         let request = UNNotificationRequest(
             identifier: identifier,
             content: content,
@@ -240,7 +258,137 @@ class ChatState: IRCConnectionDelegate {
         )
         UNUserNotificationCenter.current().add(request)
     }
+
+    /// Select the given channel (used when the user clicks a notification).
+    func focusChannel(named channelName: String, onServerHostname hostname: String) {
+        guard let server = servers.first(where: { $0.config.hostname == hostname }),
+              let channel = server.channel(named: channelName) else { return }
+        selectedChannel = channel
+    }
+
+    /// Send a message typed into a notification's inline-reply field.
+    func sendReply(_ text: String, toChannelNamed channelName: String, onServerHostname hostname: String) {
+        guard let server = servers.first(where: { $0.config.hostname == hostname }) else { return }
+        if let channel = server.channel(named: channelName) {
+            sendMessage(text, to: channel)
+        } else {
+            sendPrivateMessage(text, to: channelName, on: server)
+        }
+    }
+
+    // MARK: - Dock Badge
+
+    /// Unread DMs count in full; channels count once when they hold a mention.
+    private var dockBadgeCount: Int {
+        servers.reduce(0) { total, server in
+            total + server.channels.reduce(0) { sum, channel in
+                // Bouncer console channels (*status, *playback) don't badge
+                if channel.name.hasPrefix("*") { return sum }
+                if channel.isPrivateMessage {
+                    return sum + channel.unreadCount
+                }
+                return sum + (channel.hasMention ? 1 : 0)
+            }
+        }
+    }
+
+    private func updateDockBadge() {
+        let count = dockBadgeCount
+        NSApp.dockTile.badgeLabel = count > 0 ? "\(count)" : nil
+    }
     
+    // MARK: - System Monitors (wake / network change)
+
+    /// Reconnect immediately on wake-from-sleep and on network restoration
+    /// instead of waiting out the exponential backoff. Call once at launch.
+    func startSystemMonitors() {
+        guard !systemMonitorsStarted else { return }
+        systemMonitorsStarted = true
+
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.reconnectDroppedServers(reason: "system wake")
+            }
+        }
+
+        let monitor = NWPathMonitor()
+        monitor.pathUpdateHandler = { [weak self] path in
+            let satisfied = path.status == .satisfied
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                let wasSatisfied = self.lastPathWasSatisfied
+                self.lastPathWasSatisfied = satisfied
+                if satisfied && !wasSatisfied {
+                    self.reconnectDroppedServers(reason: "network restored")
+                }
+            }
+        }
+        monitor.start(queue: DispatchQueue(label: "com.liquidchat.pathmonitor"))
+        pathMonitor = monitor
+    }
+
+    /// Kick every non-manually-disconnected, non-connected server back to an
+    /// immediate connection attempt with a fresh backoff.
+    private func reconnectDroppedServers(reason: String) {
+        for server in servers where !server.manuallyDisconnected && !server.isConnected {
+            Task {
+                await ConsoleLogger.shared.log("Reconnecting to \(server.config.hostname) (\(reason))", level: .info, category: "Connection")
+            }
+            connectToServer(server)   // cancels any pending backoff, resets delay
+        }
+    }
+
+    // MARK: - Channel Navigation (menu commands)
+
+    /// Sidebar order: every channel of every server, flattened.
+    private var allChannels: [IRCChannel] {
+        servers.flatMap(\.channels)
+    }
+
+    func selectNextChannel() {
+        stepChannelSelection(by: 1)
+    }
+
+    func selectPreviousChannel() {
+        stepChannelSelection(by: -1)
+    }
+
+    /// Jump to the next channel with unread activity (mentions first).
+    func selectNextUnreadChannel() {
+        let channels = allChannels
+        guard !channels.isEmpty else { return }
+        let start = selectedChannel.flatMap { sel in channels.firstIndex(where: { $0 === sel }) } ?? -1
+
+        // One full lap starting after the current selection; prefer mentions
+        let ordered = (1...channels.count).map { channels[(start + $0 + channels.count) % channels.count] }
+        if let mentioned = ordered.first(where: { $0.hasMention }) {
+            selectedChannel = mentioned
+        } else if let unread = ordered.first(where: { $0.unreadCount > 0 }) {
+            selectedChannel = unread
+        }
+    }
+
+    private func stepChannelSelection(by offset: Int) {
+        let channels = allChannels
+        guard !channels.isEmpty else { return }
+        guard let current = selectedChannel,
+              let index = channels.firstIndex(where: { $0 === current }) else {
+            selectedChannel = channels.first
+            return
+        }
+        let next = (index + offset + channels.count) % channels.count
+        selectedChannel = channels[next]
+    }
+
+    /// Clear the visible channel's scrollback (⌘K / the /clear command).
+    func clearSelectedChannelBuffer() {
+        selectedChannel?.messages.removeAll()
+    }
+
     // MARK: - IRCConnectionDelegate
     
     nonisolated func connectionDidConnect(_ connection: IRCConnection) {
@@ -423,10 +571,12 @@ class ChatState: IRCConnectionDelegate {
             
         case "319": // RPL_WHOISCHANNELS
             handleWhoisChannels(message, server: server)
-            
+
         default:
             break
         }
+
+        updateDockBadge()
     }
     
     private func handlePrivMsg(_ message: IRCMessage, server: IRCServer, isNotice: Bool = false) {
@@ -511,13 +661,17 @@ class ChatState: IRCConnectionDelegate {
                 sendNotification(
                     title: "Message from \(sender)",
                     body: text,
-                    identifier: "dm-\(sender)-\(timestamp.timeIntervalSince1970)"
+                    identifier: "dm-\(sender)-\(timestamp.timeIntervalSince1970)",
+                    server: server,
+                    channelName: channelName
                 )
             } else if isMention && AppSettings.shared.enableMentionNotifications {
                 sendNotification(
                     title: "\(sender) mentioned you in \(channelName)",
                     body: text,
-                    identifier: "mention-\(sender)-\(timestamp.timeIntervalSince1970)"
+                    identifier: "mention-\(sender)-\(timestamp.timeIntervalSince1970)",
+                    server: server,
+                    channelName: channelName
                 )
             }
         }
