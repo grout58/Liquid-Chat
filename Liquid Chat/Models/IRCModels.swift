@@ -182,11 +182,11 @@ class IRCServer: Identifiable {
         self.config = config
     }
 
-    /// Look up a channel by IRC name semantics (case-insensitive per RFC 1459
-    /// casemapping) — servers freely vary the case of channel and nick names.
+    /// Look up a channel by IRC name semantics (case-insensitive per the
+    /// server's casemapping) — servers freely vary the case of names.
     func channel(named name: String) -> IRCChannel? {
-        let key = name.ircCasemapped
-        return channels.first { $0.name.ircCasemapped == key }
+        let key = isupport.fold(name)
+        return channels.first { isupport.fold($0.name) == key }
     }
 
     /// Cancel any ongoing observation tasks
@@ -293,10 +293,12 @@ class IRCChannel: Identifiable, Hashable {
         hasMention = false
     }
 
-    /// Index of a user by IRC name semantics (case-insensitive).
+    /// Index of a user by IRC name semantics (case-insensitive per the
+    /// server's casemapping).
     func userIndex(named nick: String) -> Int? {
-        let key = nick.ircCasemapped
-        return users.firstIndex { $0.nickname.ircCasemapped == key }
+        let fold = server.isupport.fold
+        let key = fold(nick)
+        return users.firstIndex { fold($0.nickname) == key }
     }
 
     func hasUser(named nick: String) -> Bool {

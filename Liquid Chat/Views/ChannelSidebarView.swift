@@ -136,12 +136,20 @@ struct ServerHeaderView: View {
                 }
             }
             
-            Text(server.config.hostname)
+            Text(server.isupport.network ?? server.config.hostname)
                 .font(.headline)
-            
+
             Spacer()
-            
+
             if server.isConnected {
+                if let lag = server.connection?.lastLagMs {
+                    Text("\(lag) ms")
+                        .font(.caption2)
+                        .monospacedDigit()
+                        .foregroundStyle(lag > 500 ? .orange : .secondary)
+                        .help("Round-trip time of the last keepalive ping")
+                }
+
                 Button {
                     showingJoinChannel = true
                 } label: {

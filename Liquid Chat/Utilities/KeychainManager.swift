@@ -63,4 +63,37 @@ enum KeychainManager {
         ]
         SecItemDelete(query as CFDictionary)
     }
+
+    // MARK: - Client Identities (SASL EXTERNAL)
+
+    /// Labels of client identities (certificate + private key pairs) available
+    /// in the keychain, for the SASL EXTERNAL certificate picker.
+    static func availableIdentityNames() -> [String] {
+        let query: [CFString: Any] = [
+            kSecClass: kSecClassIdentity,
+            kSecMatchLimit: kSecMatchLimitAll,
+            kSecReturnAttributes: true
+        ]
+        var result: AnyObject?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        guard status == errSecSuccess,
+              let items = result as? [[CFString: Any]] else { return [] }
+        return items.compactMap { $0[kSecAttrLabel] as? String }.sorted()
+    }
+
+    /// Look up a client identity by its keychain label.
+    static func findIdentity(named name: String) -> SecIdentity? {
+        let query: [CFString: Any] = [
+            kSecClass: kSecClassIdentity,
+            kSecAttrLabel: name,
+            kSecMatchLimit: kSecMatchLimitOne,
+            kSecReturnRef: true
+        ]
+        var result: AnyObject?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        guard status == errSecSuccess,
+              let ref = result,
+              CFGetTypeID(ref) == SecIdentityGetTypeID() else { return nil }
+        return (ref as! SecIdentity)
+    }
 }

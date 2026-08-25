@@ -592,4 +592,17 @@ struct IRCISupportTests {
         #expect(isupport.network == "Libera.Chat")
         #expect(isupport.casemapping == "ascii")
     }
+
+    @Test("Name folding follows the advertised casemapping")
+    func casemappingFold() throws {
+        var isupport = IRCISupport()
+
+        // Default rfc1459: brackets fold into braces
+        #expect(isupport.fold("Nick[a]") == isupport.fold("nick{a}"))
+
+        isupport.apply(token: "CASEMAPPING=ascii")
+        // ascii: case-insensitive, but brackets and braces stay distinct
+        #expect(isupport.fold("Nick") == isupport.fold("nick"))
+        #expect(isupport.fold("nick[a]") != isupport.fold("nick{a}"))
+    }
 }

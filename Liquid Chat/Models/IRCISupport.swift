@@ -37,6 +37,12 @@ struct IRCISupport: Equatable {
         name.first.map(chantypes.contains) ?? false
     }
 
+    /// Fold a name for comparison per the server's advertised casemapping:
+    /// "ascii" is plain lowercasing; anything else uses the rfc1459 rules.
+    func fold(_ name: String) -> String {
+        casemapping == "ascii" ? name.lowercased() : name.ircCasemapped
+    }
+
     /// Whether this channel-mode character consumes a parameter in a MODE line.
     func modeTakesArgument(_ mode: Character, whenAdding adding: Bool) -> Bool {
         if prefixModes.contains(mode) { return true }

@@ -63,7 +63,10 @@ struct IRCServerConfig: Codable, Identifiable, Equatable, Hashable {
     let authMethod: IRCAuthMethod
     var autoConnect: Bool
     var savedName: String? // Optional friendly name for saved servers
-    
+    /// Keychain identity label for SASL EXTERNAL client-certificate auth.
+    /// Optional so configs saved by older versions still decode.
+    var clientCertificateName: String?
+
     init(
         id: UUID = UUID(),
         hostname: String,
@@ -75,7 +78,8 @@ struct IRCServerConfig: Codable, Identifiable, Equatable, Hashable {
         password: String? = nil,
         authMethod: IRCAuthMethod = .none,
         autoConnect: Bool = false,
-        savedName: String? = nil
+        savedName: String? = nil,
+        clientCertificateName: String? = nil
     ) {
         self.id = id
         self.hostname = hostname
@@ -88,8 +92,9 @@ struct IRCServerConfig: Codable, Identifiable, Equatable, Hashable {
         self.authMethod = authMethod
         self.autoConnect = autoConnect
         self.savedName = savedName
+        self.clientCertificateName = clientCertificateName
     }
-    
+
     var displayName: String {
         savedName ?? "\(nickname)@\(hostname)"
     }
@@ -107,7 +112,8 @@ struct IRCServerConfig: Codable, Identifiable, Equatable, Hashable {
             password: newPassword,
             authMethod: authMethod,
             autoConnect: autoConnect,
-            savedName: savedName
+            savedName: savedName,
+            clientCertificateName: clientCertificateName
         )
     }
 }
@@ -184,7 +190,22 @@ class IRCConnection {
         // Configure NWConnection parameters
         let parameters: NWParameters
         if config.useSSL {
-            parameters = .tls
+            let tlsOptions = NWProtocolTLS.Options()
+
+            // SASL EXTERNAL authenticates with a TLS client certificate —
+            // present the configured keychain identity during the handshake.
+            if config.authMethod == .saslExternal {
+                if let certName = config.clientCertificateName,
+                   let identity = KeychainManager.findIdentity(named: certName),
+                   let secIdentity = sec_identity_create(identity) {
+                    sec_protocol_options_set_local_identity(tlsOptions.securityProtocolOptions, secIdentity)
+                    log("Presenting client certificate \"\(certName)\" for SASL EXTERNAL", level: .info)
+                } else {
+                    log("SASL EXTERNAL selected but no client certificate is configured or found — authentication will fail", level: .warning)
+                }
+            }
+
+            parameters = NWParameters(tls: tlsOptions)
         } else {
             parameters = .tcp
         }

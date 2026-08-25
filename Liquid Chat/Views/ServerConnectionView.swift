@@ -24,6 +24,8 @@ struct ServerConnectionView: View {
     @State private var authMethod: IRCAuthMethod = .none
     @State private var autoConnect = false
     @State private var saveServer = false
+    @State private var clientCertificateName = ""
+    @State private var availableIdentities: [String] = []
     
     /// Existing configuration to edit (nil for new connection)
     let existingConfig: IRCServerConfig?
@@ -58,6 +60,7 @@ struct ServerConnectionView: View {
         _savedName = State(initialValue: existingConfig.savedName ?? "")
         _authMethod = State(initialValue: existingConfig.authMethod)
         _autoConnect = State(initialValue: existingConfig.autoConnect)
+        _clientCertificateName = State(initialValue: existingConfig.clientCertificateName ?? "")
         _saveServer = State(initialValue: true) // Always save when editing
         _showingSavedServers = State(initialValue: false) // Hide sidebar when editing
     }
@@ -139,10 +142,27 @@ struct ServerConnectionView: View {
                     Text("None").tag(IRCAuthMethod.none)
                     Text("Server Password").tag(IRCAuthMethod.password)
                     Text("SASL").tag(IRCAuthMethod.sasl)
+                    Text("SASL EXTERNAL (Certificate)").tag(IRCAuthMethod.saslExternal)
                     Text("NickServ").tag(IRCAuthMethod.nickserv)
                 }
-                
-                if authMethod != .none {
+
+                if authMethod == .saslExternal {
+                    if availableIdentities.isEmpty {
+                        Text("No client certificates found in your keychain. Import a certificate with its private key (a .p12 file) using Keychain Access, then reopen this dialog.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Picker("Certificate", selection: $clientCertificateName) {
+                            Text("Choose…").tag("")
+                            ForEach(availableIdentities, id: \.self) { name in
+                                Text(name).tag(name)
+                            }
+                        }
+                    }
+                    Text("Authenticates with the certificate over TLS — no password needed.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else if authMethod != .none {
                     SecureField("Password", text: $password)
                         .textContentType(.password)
                 }
@@ -166,6 +186,15 @@ struct ServerConnectionView: View {
             if let server = newValue {
                 loadServerIntoForm(server)
             }
+        }
+        .onChange(of: authMethod) { _, newValue in
+            // Certificate auth only works over TLS
+            if newValue == .saslExternal {
+                useSSL = true
+            }
+        }
+        .onAppear {
+            availableIdentities = KeychainManager.availableIdentityNames()
         }
         }
         .frame(width: 800, height: 500)
@@ -263,7 +292,8 @@ struct ServerConnectionView: View {
             password: password.isEmpty ? nil : password,
             authMethod: authMethod,
             autoConnect: saveServer ? autoConnect : false,
-            savedName: savedName.isEmpty ? nil : savedName
+            savedName: savedName.isEmpty ? nil : savedName,
+            clientCertificateName: clientCertificateName.isEmpty ? nil : clientCertificateName
         )
     }
     
@@ -279,6 +309,7 @@ struct ServerConnectionView: View {
         authMethod = server.authMethod
         autoConnect = server.autoConnect
         saveServer = true
+        clientCertificateName = server.clientCertificateName ?? ""
     }
     
     private func clearForm() {
@@ -293,6 +324,7 @@ struct ServerConnectionView: View {
         authMethod = .none
         autoConnect = false
         saveServer = false
+        clientCertificateName = ""
     }
 }
 

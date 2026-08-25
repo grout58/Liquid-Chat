@@ -259,7 +259,15 @@ class ChatState: IRCConnectionDelegate {
             content: content,
             trigger: nil
         )
-        UNUserNotificationCenter.current().add(request)
+        // Ask for permission lazily, on the first notification-worthy event,
+        // instead of interrupting the user right after their first connect.
+        Task {
+            let center = UNUserNotificationCenter.current()
+            if await center.notificationSettings().authorizationStatus == .notDetermined {
+                _ = try? await center.requestAuthorization(options: [.alert, .sound, .badge])
+            }
+            try? await center.add(request)
+        }
     }
 
     /// Select the given channel (used when the user clicks a notification).
@@ -404,12 +412,7 @@ class ChatState: IRCConnectionDelegate {
         Task {
             await ConsoleLogger.shared.log("Registered on \(connection.config.hostname)", level: .info, category: "Connection")
         }
-        // Request notification permission once after first successful registration
-        Task {
-            try? await UNUserNotificationCenter.current()
-                .requestAuthorization(options: [.alert, .sound, .badge])
-        }
-        
+
         // Mark server as connected - dispatch to MainActor without blocking
         Task { @MainActor in
             if let server = servers.first(where: { $0.connection === connection }) {
@@ -698,7 +701,7 @@ class ChatState: IRCConnectionDelegate {
         guard !AppSettings.shared.isIgnored(nick) else { return }
 
         let channelName = message.parameters[0]
-        let isSelf = server.connection.map { nick.ircCasemapped == $0.currentNickname.ircCasemapped } ?? false
+        let isSelf = server.connection.map { server.isupport.fold(nick) == server.isupport.fold($0.currentNickname) } ?? false
 
         var channel = server.channel(named: channelName)
         if channel == nil, isSelf {
@@ -752,7 +755,7 @@ class ChatState: IRCConnectionDelegate {
             // If it's us (e.g. a PART issued from another bouncer client), the
             // channel is no longer joined.
             if let connection = server.connection,
-               nick.ircCasemapped == connection.currentNickname.ircCasemapped {
+               server.isupport.fold(nick) == server.isupport.fold(connection.currentNickname) {
                 channel.isJoined = false
             }
         }
@@ -1037,7 +1040,7 @@ class ChatState: IRCConnectionDelegate {
 
             // If we were kicked, mark channel as not joined
             if let connection = server.connection,
-               kickedUser.ircCasemapped == connection.currentNickname.ircCasemapped {
+               server.isupport.fold(kickedUser) == server.isupport.fold(connection.currentNickname) {
                 channel.isJoined = false
             }
         }
