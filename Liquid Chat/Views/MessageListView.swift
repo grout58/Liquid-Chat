@@ -16,53 +16,37 @@ struct MessageListView: View {
     
     @State private var scrollPosition: UUID?
     @State private var expandedStatusGroups: Set<UUID> = []
-    
-    // Group messages for better UX
-    private var groupedMessages: [MessageGroup] {
+    /// True while the user is at (or near) the bottom of the scroll view —
+    /// new messages only auto-scroll then, so reading history isn't yanked away.
+    @State private var isPinnedToBottom = true
+
+    /// One O(n) pass produces the groups plus the index maps the rows need,
+    /// replacing the per-row linear scans over the whole message array.
+    private struct GroupingIndex {
+        var groups: [MessageGroup] = []
+        var firstMessageIndex: [UUID: Int] = [:]   // group id → index of its first message
+        var groupIDForMessageIndex: [Int: UUID] = [:]  // message index → containing group id
+    }
+
+    private var grouping: GroupingIndex {
         groupMessages(channel.messages)
     }
-    
-    // Find group containing a specific message index
-    private func findGroup(forMessageIndex index: Int) -> UUID? {
-        for group in groupedMessages {
-            switch group {
-            case .regular(_, _):
-                if let groupIndex = channel.messages.firstIndex(where: { msg in
-                    if case .regular(let message, _) = group {
-                        return msg.id == message.id
-                    }
-                    return false
-                }), groupIndex == index {
-                    return group.id
-                }
-            case .statusGroup(let messages):
-                if messages.contains(where: { msg in
-                    if let msgIndex = channel.messages.firstIndex(where: { $0.id == msg.id }) {
-                        return msgIndex == index
-                    }
-                    return false
-                }) {
-                    return group.id
-                }
-            }
-        }
-        return nil
-    }
-    
+
     var body: some View {
+        let grouping = self.grouping
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 2) {
-                    ForEach(Array(groupedMessages.enumerated()), id: \.element.id) { index, group in
-                        let prevBatchID = index > 0 ? groupedMessages[index - 1].batchID : nil
+                    ForEach(Array(grouping.groups.enumerated()), id: \.element.id) { index, group in
+                        let prevBatchID = index > 0 ? grouping.groups[index - 1].batchID : nil
                         if group.batchID != nil && group.batchID != prevBatchID {
                             BatchSeparatorView()
                         }
                         MessageGroupView(
                             group: group,
                             channel: channel,
-                            messageIndex: getMessageIndex(for: group),
-                            isHighlighted: isGroupHighlighted(group),
+                            messageIndex: grouping.firstMessageIndex[group.id],
+                            isHighlighted: highlightedMessageIndex.map { grouping.groupIDForMessageIndex[$0] == group.id } ?? false,
                             isExpanded: expandedStatusGroups.contains(group.id),
                             searchText: searchText,
                             onToggleExpand: {
@@ -78,9 +62,15 @@ struct MessageListView: View {
                 }
                 .padding(12)
             }
+            .onScrollGeometryChange(for: Bool.self) { geometry in
+                geometry.contentOffset.y + geometry.containerSize.height >= geometry.contentSize.height - 60
+            } action: { _, isAtBottom in
+                isPinnedToBottom = isAtBottom
+            }
             .onChange(of: channel.messages.count) { _, _ in
-                // Auto-scroll to bottom on new messages
-                if let lastGroup = groupedMessages.last {
+                // Auto-scroll only while pinned to the bottom
+                guard isPinnedToBottom else { return }
+                if let lastGroup = self.grouping.groups.last {
                     withAnimation(.easeOut(duration: 0.2)) {
                         proxy.scrollTo(lastGroup.id, anchor: .bottom)
                     }
@@ -88,12 +78,12 @@ struct MessageListView: View {
             }
             .onChange(of: scrollToMessageIndex) { _, newIndex in
                 guard let index = newIndex,
-                      let groupId = findGroup(forMessageIndex: index) else { return }
-                
+                      let groupId = self.grouping.groupIDForMessageIndex[index] else { return }
+
                 withAnimation(.easeInOut(duration: 0.3)) {
                     proxy.scrollTo(groupId, anchor: .center)
                 }
-                
+
                 // Clear scroll target
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                     scrollToMessageIndex = nil
@@ -101,73 +91,53 @@ struct MessageListView: View {
             }
         }
     }
-    
-    private func getMessageIndex(for group: MessageGroup) -> Int? {
-        switch group {
-        case .regular(let message, _):
-            return channel.messages.firstIndex(where: { $0.id == message.id })
-        case .statusGroup(let messages):
-            if let firstMsg = messages.first {
-                return channel.messages.firstIndex(where: { $0.id == firstMsg.id })
-            }
-            return nil
-        }
-    }
-    
-    private func isGroupHighlighted(_ group: MessageGroup) -> Bool {
-        guard let highlightIndex = highlightedMessageIndex else { return false }
-        
-        switch group {
-        case .regular(let message, _):
-            if let index = channel.messages.firstIndex(where: { $0.id == message.id }) {
-                return index == highlightIndex
-            }
-        case .statusGroup(let messages):
-            for msg in messages {
-                if let index = channel.messages.firstIndex(where: { $0.id == msg.id }),
-                   index == highlightIndex {
-                    return true
-                }
-            }
-        }
-        return false
-    }
-    
+
     // MARK: - Message Grouping Logic
-    
-    private func groupMessages(_ messages: [IRCChatMessage]) -> [MessageGroup] {
-        var groups: [MessageGroup] = []
+
+    private func groupMessages(_ messages: [IRCChatMessage]) -> GroupingIndex {
+        var result = GroupingIndex()
         var currentStatusGroup: [IRCChatMessage] = []
-        
+        var currentStatusIndices: [Int] = []
+
+        func flushStatusGroup() {
+            guard !currentStatusGroup.isEmpty else { return }
+            let group = MessageGroup.statusGroup(currentStatusGroup)
+            result.firstMessageIndex[group.id] = currentStatusIndices.first
+            for messageIndex in currentStatusIndices {
+                result.groupIDForMessageIndex[messageIndex] = group.id
+            }
+            result.groups.append(group)
+            currentStatusGroup = []
+            currentStatusIndices = []
+        }
+
         for (index, message) in messages.enumerated() {
             let isStatusEvent = [.join, .part, .quit, .nick].contains(message.type)
-            
+
             if isStatusEvent {
                 // Accumulate status events
                 currentStatusGroup.append(message)
+                currentStatusIndices.append(index)
             } else {
                 // Flush any accumulated status events
-                if !currentStatusGroup.isEmpty {
-                    groups.append(.statusGroup(currentStatusGroup))
-                    currentStatusGroup = []
-                }
-                
+                flushStatusGroup()
+
                 // Check if we should group with previous message
                 let previousIndex = index - 1
                 let shouldGroup = previousIndex >= 0 &&
-                    !isStatusEvent &&
                     shouldGroupWith(message, previous: messages[previousIndex])
-                
-                groups.append(.regular(message, isGrouped: shouldGroup))
+
+                let group = MessageGroup.regular(message, isGrouped: shouldGroup)
+                result.firstMessageIndex[group.id] = index
+                result.groupIDForMessageIndex[index] = group.id
+                result.groups.append(group)
             }
         }
-        
+
         // Flush any remaining status events
-        if !currentStatusGroup.isEmpty {
-            groups.append(.statusGroup(currentStatusGroup))
-        }
-        
-        return groups
+        flushStatusGroup()
+
+        return result
     }
     
     private func shouldGroupWith(_ message: IRCChatMessage, previous: IRCChatMessage) -> Bool {
@@ -476,8 +446,9 @@ struct MessageRowView: View {
             }
         }
         .task {
-            // Only fetch previews for regular messages
-            guard message.type == .message else { return }
+            // Only fetch previews for regular messages, and only when enabled —
+            // an automatic fetch discloses the reader's IP to any posted URL
+            guard AppSettings.shared.enableURLPreviews, message.type == .message else { return }
             
             // Extract URLs from message
             let messageText = String(message.content.characters)
@@ -493,70 +464,48 @@ struct MessageRowView: View {
     }
 }
 
-/// High-performance text view using TextLayout API for rendering chat messages
-/// This view uses NSTextLayoutManager for optimal performance with large chat histories
+/// Renders a message's pre-processed AttributedString. URL detection and mIRC
+/// code stripping happen once at ingest (IRCTextFormatter) — this view only
+/// layers on the theme base color and any live search highlight.
 struct HighPerformanceTextView: View {
     let content: AttributedString
     let baseColor: Color
     var searchText: String? = nil
-    
-    // PERFORMANCE: Static URL detector cached across all instances
-    private static let urlDetector = try? NSDataDetector(
-        types: NSTextCheckingResult.CheckingType.link.rawValue
-    )
-    
+
     init(content: AttributedString, baseColor: Color = .primary, searchText: String? = nil) {
         self.content = content
         self.baseColor = baseColor
         self.searchText = searchText
     }
-    
+
     var processedContent: AttributedString {
         var attributed = content
-        
-        // Apply base color to text
-        if let range = attributed.range(of: String(attributed.characters)) {
-            attributed[range].foregroundColor = baseColor
+
+        // Apply the theme color to runs that don't carry their own (links stay blue)
+        for run in attributed.runs where run.link == nil && run.foregroundColor == nil {
+            attributed[run.range].foregroundColor = baseColor
         }
-        
-        let text = String(attributed.characters)
-        
-        // Highlight search matches
+
+        // Highlight search matches, mapping by character offset so repeated
+        // words highlight each occurrence at its own position
         if let searchTerm = searchText, !searchTerm.isEmpty {
-            let searchLower = searchTerm.lowercased()
-            let textLower = text.lowercased()
-            
-            var startIndex = textLower.startIndex
-            while let range = textLower.range(of: searchLower, range: startIndex..<textLower.endIndex) {
-                // Convert to attributed string range
-                if let attrRange = attributed.range(of: String(text[range])) {
+            let text = String(attributed.characters)
+            var searchStart = text.startIndex
+            while let range = text.range(of: searchTerm, options: .caseInsensitive,
+                                         range: searchStart..<text.endIndex) {
+                let offset = text.distance(from: text.startIndex, to: range.lowerBound)
+                let length = text.distance(from: range.lowerBound, to: range.upperBound)
+                if let attrRange = attributed.characterRange(offset: offset, length: length) {
                     attributed[attrRange].backgroundColor = Color.yellow.opacity(0.4)
                     attributed[attrRange].foregroundColor = Color.black
                 }
-                startIndex = range.upperBound
+                searchStart = range.upperBound
             }
         }
-        
-        // Detect and linkify URLs using cached detector
-        let matches = Self.urlDetector?.matches(
-            in: text,
-            range: NSRange(text.startIndex..., in: text)
-        )
-        
-        for match in matches ?? [] {
-            if let range = Range(match.range, in: text),
-               let attributedRange = attributed.range(of: String(text[range])) {
-                attributed[attributedRange].foregroundColor = .blue
-                attributed[attributedRange].underlineStyle = .single
-                if let url = match.url {
-                    attributed[attributedRange].link = url
-                }
-            }
-        }
-        
+
         return attributed
     }
-    
+
     var body: some View {
         Text(processedContent)
             .font(.body)

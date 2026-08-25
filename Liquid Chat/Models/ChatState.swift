@@ -7,6 +7,7 @@
 
 import Foundation
 import SwiftUI
+import AppKit
 import UserNotifications
 
 @MainActor
@@ -44,11 +45,24 @@ class ChatState: IRCConnectionDelegate {
     }
     
     /// Connects to an IRC server and observes its connection state
-    /// - Parameter server: The server to connect to
-    func connectToServer(_ server: IRCServer) {
+    /// - Parameters:
+    ///   - server: The server to connect to
+    ///   - resetBackoff: Pass false on automatic reconnect attempts so the
+    ///     exponential backoff keeps growing across failures.
+    func connectToServer(_ server: IRCServer, resetBackoff: Bool = true) {
         server.manuallyDisconnected = false
-        server.reconnectDelay = 5.0
+        if resetBackoff {
+            server.reconnectDelay = 5.0
+        }
         server.cancelReconnect()
+
+        // Tear down any previous connection so it can't leak the socket or
+        // keep delivering events for a server that has moved on.
+        if let oldConnection = server.connection {
+            oldConnection.delegate = nil
+            oldConnection.disconnect()
+        }
+
         let connection = IRCConnection(config: server.config)
         connection.delegate = self
         server.connection = connection
@@ -104,11 +118,13 @@ class ChatState: IRCConnectionDelegate {
     }
     
     /// Disconnects from an IRC server and cancels observation
-    /// - Parameter server: The server to disconnect from
-    func disconnectFromServer(_ server: IRCServer) {
+    /// - Parameters:
+    ///   - server: The server to disconnect from
+    ///   - message: The QUIT message shown to other users
+    func disconnectFromServer(_ server: IRCServer, message: String = "Leaving") {
         server.manuallyDisconnected = true
         server.cancelReconnect()
-        server.connection?.disconnect()
+        server.connection?.disconnect(message: message)
         server.connection = nil
         server.isConnected = false
         server.connectionState = .disconnected
@@ -122,21 +138,20 @@ class ChatState: IRCConnectionDelegate {
     ///   - name: The channel name (e.g., "#swift")
     ///   - server: The server where the channel exists
     func joinChannel(name: String, on server: IRCServer) {
-        guard let connection = server.connection else { return }
-        
         // Create channel if it doesn't exist, or get existing one
         let channel: IRCChannel
-        if let existing = server.channels.first(where: { $0.name == name }) {
+        if let existing = server.channel(named: name) {
             channel = existing
         } else {
             channel = IRCChannel(name: name, server: server)
             server.channels.append(channel)
         }
-        
-        // Switch to the channel immediately
+
+        // Switch to the channel immediately; the JOIN goes out only when a
+        // connection exists (the channel still appears while disconnected).
         selectedChannel = channel
-        
-        connection.join(channel: name)
+
+        server.connection?.join(channel: name)
     }
     
     /// Leaves an IRC channel
@@ -153,17 +168,17 @@ class ChatState: IRCConnectionDelegate {
     ///   - server: The server where the user is connected
     func openPrivateMessage(with nickname: String, on server: IRCServer) {
         // Check if we already have a DM open with this user
-        if let existingChannel = server.channels.first(where: { $0.name == nickname }) {
+        if let existingChannel = server.channel(named: nickname) {
             selectedChannel = existingChannel
             return
         }
-        
+
         // Create a new private message channel
         let channel = IRCChannel(name: nickname, server: server)
         server.channels.append(channel)
         selectedChannel = channel
     }
-    
+
     /// Sends a message to an IRC channel
     /// - Parameters:
     ///   - text: The message text to send
@@ -178,6 +193,32 @@ class ChatState: IRCConnectionDelegate {
             content: text,
             type: .message
         )
+        channel.appendMessage(message, isActive: true)
+
+        // Log our own messages alongside received ones
+        Task {
+            await ChannelLogger.shared.log(
+                message: message,
+                channel: channel.name,
+                server: channel.server.config.hostname
+            )
+        }
+    }
+
+    /// Sends a message to an arbitrary target (`/msg nick text`), echoing it
+    /// into the matching query channel without switching selection.
+    func sendPrivateMessage(_ text: String, to target: String, on server: IRCServer) {
+        guard let connection = server.connection else { return }
+        connection.sendMessage(text, to: target)
+
+        let channel: IRCChannel
+        if let existing = server.channel(named: target) {
+            channel = existing
+        } else {
+            channel = IRCChannel(name: target, server: server)
+            server.channels.append(channel)
+        }
+        let message = IRCChatMessage(sender: connection.currentNickname, content: text, type: .message)
         channel.appendMessage(message, isActive: true)
     }
 
@@ -282,7 +323,11 @@ class ChatState: IRCConnectionDelegate {
 
     /// Schedule a reconnect attempt with exponential backoff (5s → 10s → 20s … capped at 300s)
     private func scheduleReconnect(for server: IRCServer) {
+        guard AppSettings.shared.autoReconnect else { return }
         guard !server.manuallyDisconnected else { return }
+        // A failure can surface as both didFail and didDisconnect — one pending
+        // reconnect is enough, and double-scheduling would double-bump the backoff.
+        guard server.reconnectTask == nil else { return }
 
         let delay = server.reconnectDelay
         // Double the delay for next attempt, cap at 5 minutes
@@ -297,7 +342,7 @@ class ChatState: IRCConnectionDelegate {
             try? await Task.sleep(for: .seconds(delay))
             guard !Task.isCancelled, !server.manuallyDisconnected else { return }
             await MainActor.run {
-                self.connectToServer(server)
+                self.connectToServer(server, resetBackoff: false)
             }
         }
     }
@@ -324,21 +369,27 @@ class ChatState: IRCConnectionDelegate {
         switch message.command {
         case "PRIVMSG":
             handlePrivMsg(message, server: server)
-            
+
+        case "NOTICE":
+            handlePrivMsg(message, server: server, isNotice: true)
+
         case "JOIN":
             handleJoin(message, server: server)
-            
+
         case "PART":
             handlePart(message, server: server)
-            
+
         case "QUIT":
             handleQuit(message, server: server)
-            
+
         case "332": // RPL_TOPIC
             handleTopic(message, server: server)
-            
+
         case "353": // RPL_NAMREPLY
             handleNamesReply(message, server: server)
+
+        case "366": // RPL_ENDOFNAMES
+            handleEndOfNames(message, server: server)
             
         case "321": // RPL_LISTSTART
             handleListStart(message, server: server)
@@ -378,7 +429,7 @@ class ChatState: IRCConnectionDelegate {
         }
     }
     
-    private func handlePrivMsg(_ message: IRCMessage, server: IRCServer) {
+    private func handlePrivMsg(_ message: IRCMessage, server: IRCServer, isNotice: Bool = false) {
         guard message.parameters.count >= 2,
               let sender = message.nick else { return }
 
@@ -386,23 +437,55 @@ class ChatState: IRCConnectionDelegate {
         guard !AppSettings.shared.isIgnored(sender) else { return }
 
         let target = message.parameters[0]
-        let text = message.parameters[1]
+        var text = message.parameters[1]
+        var messageType: IRCChatMessage.MessageType = isNotice ? .notice : .message
+
+        // CTCP payloads are wrapped in \u{01}: ACTION renders as an action,
+        // VERSION/PING queries get their standard NOTICE replies.
+        if text.hasPrefix("\u{01}") {
+            var inner = text.dropFirst()
+            if inner.hasSuffix("\u{01}") { inner = inner.dropLast() }
+
+            if isNotice {
+                // CTCP reply (e.g. a VERSION response) — show as a notice
+                text = String(inner)
+            } else if inner.hasPrefix("ACTION ") || inner == "ACTION" {
+                messageType = .action
+                text = String(inner.dropFirst("ACTION".count)).trimmingCharacters(in: .whitespaces)
+            } else if inner == "VERSION" || inner.hasPrefix("VERSION ") {
+                server.connection?.send(command: "NOTICE", parameters: [sender, "\u{01}VERSION Liquid Chat\u{01}"])
+                return
+            } else if inner == "PING" || inner.hasPrefix("PING ") {
+                server.connection?.send(command: "NOTICE", parameters: [sender, "\u{01}\(inner)\u{01}"])
+                return
+            } else {
+                // Other CTCP queries: ignore quietly
+                return
+            }
+        }
 
         // Route ZNC pseudo-server messages (*status, *playback, etc.) to a dedicated console channel
         if sender.hasPrefix("*") {
             handleZNCStatus(message: text, from: sender, server: server)
             return
         }
-        
+
+        // Server notices (prefix without a user part) go to a server console
+        // channel rather than opening a "query" with the hostname as its peer.
+        if isNotice, message.prefix?.contains("!") != true {
+            handleZNCStatus(message: text, from: sender, server: server)
+            return
+        }
+
         // Determine if this is a channel message or private message
         let isChannelMessage = target.hasPrefix("#") || target.hasPrefix("&")
-        
+
         // For private messages, the "channel" is the sender's nickname
         let channelName = isChannelMessage ? target : sender
-        
+
         // Find or create channel/query
         let channel: IRCChannel
-        if let existingChannel = server.channels.first(where: { $0.name == channelName }) {
+        if let existingChannel = server.channel(named: channelName) {
             channel = existingChannel
         } else {
             // Create a query channel for private messages
@@ -410,20 +493,20 @@ class ChatState: IRCConnectionDelegate {
             server.channels.append(newChannel)
             channel = newChannel
         }
-        
+
         // Use server timestamp if available (IRCv3 server-time capability)
         let timestamp = message.serverTime ?? Date()
-        let chatMessage = IRCChatMessage(sender: sender, content: text, type: .message, timestamp: timestamp, batchID: message.batchID)
+        let chatMessage = IRCChatMessage(sender: sender, content: text, type: messageType, timestamp: timestamp, batchID: message.batchID)
 
         let currentNick = server.connection?.currentNickname
         let isActive = channel === selectedChannel
         channel.appendMessage(chatMessage, currentNickname: currentNick, isActive: isActive)
 
-        // Fire desktop notifications for mentions and DMs
-        let textLower = text.lowercased()
-        let isMention = currentNick.map { textLower.contains($0.lowercased()) } ?? false
+        // Fire desktop notifications for mentions and DMs. The selected channel
+        // still notifies while the app itself is in the background.
+        let isMention = currentNick.map { text.containsNick($0) } ?? false
 
-        if !isActive {
+        if !isActive || !NSApplication.shared.isActive {
             if !isChannelMessage && AppSettings.shared.enablePrivateMessageNotifications {
                 sendNotification(
                     title: "Message from \(sender)",
@@ -453,39 +536,51 @@ class ChatState: IRCConnectionDelegate {
         guard message.parameters.count >= 1,
               let nick = message.nick else { return }
         guard !AppSettings.shared.isIgnored(nick) else { return }
-        
+
         let channelName = message.parameters[0]
-        
-        if let channel = server.channels.first(where: { $0.name == channelName }) {
-            // Add user to channel
-            let user = IRCUser(nickname: nick)
-            channel.users.append(user)
-            
-            // Add system message
-            let joinMessage = IRCChatMessage(
-                sender: "System",
-                content: "\(nick) has joined \(channelName)",
-                type: .join
-            )
-            channel.appendMessage(joinMessage)
-            
-            // If it's us, mark channel as joined
-            if let connection = server.connection, nick == connection.currentNickname {
-                channel.isJoined = true
-            }
+        let isSelf = server.connection.map { nick.ircCasemapped == $0.currentNickname.ircCasemapped } ?? false
+
+        var channel = server.channel(named: channelName)
+        if channel == nil, isSelf {
+            // The server joined us to a channel we didn't initiate locally
+            // (bouncer attach, forced join) — create it so events aren't lost.
+            let newChannel = IRCChannel(name: channelName, server: server)
+            server.channels.append(newChannel)
+            channel = newChannel
+        }
+        guard let channel else { return }
+
+        // Add user to channel (netjoins can replay a JOIN for a present user)
+        if !channel.hasUser(named: nick) {
+            channel.users.append(IRCUser(nickname: nick))
+        }
+
+        // Add system message
+        let joinMessage = IRCChatMessage(
+            sender: "System",
+            content: "\(nick) has joined \(channelName)",
+            type: .join
+        )
+        channel.appendMessage(joinMessage)
+
+        // If it's us, mark channel as joined
+        if isSelf {
+            channel.isJoined = true
         }
     }
-    
+
     private func handlePart(_ message: IRCMessage, server: IRCServer) {
         guard message.parameters.count >= 1,
               let nick = message.nick else { return }
-        
+
         let channelName = message.parameters[0]
-        
-        if let channel = server.channels.first(where: { $0.name == channelName }) {
+
+        if let channel = server.channel(named: channelName) {
             // Remove user from channel
-            channel.users.removeAll { $0.nickname == nick }
-            
+            if let userIndex = channel.userIndex(named: nick) {
+                channel.users.remove(at: userIndex)
+            }
+
             // Add system message
             let partMessage = IRCChatMessage(
                 sender: "System",
@@ -493,23 +588,30 @@ class ChatState: IRCConnectionDelegate {
                 type: .part
             )
             channel.appendMessage(partMessage)
+
+            // If it's us (e.g. a PART issued from another bouncer client), the
+            // channel is no longer joined.
+            if let connection = server.connection,
+               nick.ircCasemapped == connection.currentNickname.ircCasemapped {
+                channel.isJoined = false
+            }
         }
     }
-    
+
     /// Handles QUIT messages from IRC server
     /// Optimized to O(n) by using single-pass removal instead of contains+removeAll
     private func handleQuit(_ message: IRCMessage, server: IRCServer) {
         guard let nick = message.nick else { return }
-        
+
         let quitMessage = message.parameters.first ?? "Quit"
-        
+
         // Optimized: Single pass through channels, only create quit message if user was present
         for channel in server.channels {
             // Use firstIndex for O(n) single-pass check and removal
-            if let userIndex = channel.users.firstIndex(where: { $0.nickname == nick }) {
+            if let userIndex = channel.userIndex(named: nick) {
                 // Remove user (already found, no need to search again)
                 channel.users.remove(at: userIndex)
-                
+
                 // Add quit message only to channels where user was present
                 let systemMessage = IRCChatMessage(
                     sender: "System",
@@ -523,39 +625,52 @@ class ChatState: IRCConnectionDelegate {
     
     private func handleTopic(_ message: IRCMessage, server: IRCServer) {
         guard message.parameters.count >= 2 else { return }
-        
+
         let channelName = message.parameters[1]
         let topic = message.parameters.count >= 3 ? message.parameters[2] : ""
-        
-        if let channel = server.channels.first(where: { $0.name == channelName }) {
+
+        if let channel = server.channel(named: channelName) {
             channel.topic = topic
         }
     }
-    
+
+    /// NAMES prefix symbols → the membership mode letters stored on IRCUser
+    /// (the same letters MODE events use, so the two sources stay consistent).
+    private static let prefixModeMap: [Character: Character] = [
+        "~": "q", "&": "a", "@": "o", "%": "h", "+": "v"
+    ]
+
     private func handleNamesReply(_ message: IRCMessage, server: IRCServer) {
-        guard message.parameters.count >= 4 else { 
+        guard message.parameters.count >= 4 else {
             Task { await ConsoleLogger.shared.log("NAMES: Invalid parameters count: \(message.parameters.count)", level: .error, category: "IRC") }
-            return 
+            return
         }
-        
+
         let channelName = message.parameters[2]
         let names = message.parameters[3].split(separator: " ").map(String.init)
-        
+
         Task { await ConsoleLogger.shared.log("NAMES for \(channelName): \(names.count) users", level: .info, category: "IRC") }
-        
-        if let channel = server.channels.first(where: { $0.name == channelName }) {
+
+        if let channel = server.channel(named: channelName) {
+            // First reply of a burst replaces the stale list (users who left
+            // while we were disconnected would otherwise linger forever).
+            if !channel.isReceivingNames {
+                channel.isReceivingNames = true
+                channel.users.removeAll()
+            }
+
             for name in names {
                 var nickname = name
                 var modes: Set<Character> = []
-                
+
                 // Parse mode prefixes (handle multi-prefix like @+nickname)
-                while let first = nickname.first, ["@", "+", "%", "&", "~"].contains(first) {
-                    modes.insert(first)
+                while let first = nickname.first, let modeLetter = Self.prefixModeMap[first] {
+                    modes.insert(modeLetter)
                     nickname.removeFirst()
                 }
-                
+
                 let user = IRCUser(nickname: nickname, modes: modes)
-                if !channel.users.contains(where: { $0.nickname == nickname }) {
+                if !channel.hasUser(named: nickname) {
                     channel.users.append(user)
                 }
             }
@@ -563,6 +678,12 @@ class ChatState: IRCConnectionDelegate {
         } else {
             Task { await ConsoleLogger.shared.log("Channel \(channelName) not found in server channels", level: .warning, category: "IRC") }
         }
+    }
+
+    /// 366 RPL_ENDOFNAMES — the NAMES burst for a channel is complete.
+    private func handleEndOfNames(_ message: IRCMessage, server: IRCServer) {
+        guard message.parameters.count >= 2 else { return }
+        server.channel(named: message.parameters[1])?.isReceivingNames = false
     }
     
     // MARK: - ZNC Bouncer Handling
@@ -572,7 +693,7 @@ class ChatState: IRCConnectionDelegate {
         let consoleName = sender  // e.g. "*status" or "*playback"
 
         let channel: IRCChannel
-        if let existing = server.channels.first(where: { $0.name == consoleName }) {
+        if let existing = server.channel(named: consoleName) {
             channel = existing
         } else {
             let newChannel = IRCChannel(name: consoleName, server: server)
@@ -589,7 +710,8 @@ class ChatState: IRCConnectionDelegate {
     // MARK: - Channel List Handling
     
     private func handleListStart(_ message: IRCMessage, server: IRCServer) {
-        // Clear previous list and start loading
+        // Clear previous list (including any stale buffered entries) and start loading
+        server.clearChannelListBuffer()
         server.availableChannels.removeAll()
         server.isLoadingChannelList = true
         Task { await ConsoleLogger.shared.log("LIST START - loading channels...", level: .info, category: "IRC") }
@@ -623,14 +745,12 @@ class ChatState: IRCConnectionDelegate {
     
     private func handleListEnd(_ message: IRCMessage, server: IRCServer) {
         Task { await ConsoleLogger.shared.log("LIST END received", level: .info, category: "IRC") }
-        
-        // Flush and sort in single operation (sorting happens in actor)
-        Task.detached {
+
+        // Flush on the MainActor (the sort itself hops off-main inside);
+        // running detached here raced the buffered entries and dropped some.
+        Task {
             await server.flushChannelListBuffer()
-            
-            await MainActor.run {
-                server.isLoadingChannelList = false
-            }
+            server.isLoadingChannelList = false
         }
     }
     
@@ -643,10 +763,10 @@ class ChatState: IRCConnectionDelegate {
               let oldNick = message.nick else { return }
         
         let newNick = message.parameters[0]
-        
+
         // Update user in all channels they're in (optimized with firstIndex for single-pass lookup)
         for channel in server.channels {
-            if let userIndex = channel.users.firstIndex(where: { $0.nickname == oldNick }) {
+            if let userIndex = channel.userIndex(named: oldNick) {
                 let oldUser = channel.users[userIndex]
                 let updatedUser = IRCUser(
                     nickname: newNick,
@@ -655,7 +775,7 @@ class ChatState: IRCConnectionDelegate {
                     modes: oldUser.modes
                 )
                 channel.users[userIndex] = updatedUser
-                
+
                 // Add system message
                 let nickMessage = IRCChatMessage(
                     sender: "System",
@@ -665,11 +785,8 @@ class ChatState: IRCConnectionDelegate {
                 channel.appendMessage(nickMessage)
             }
         }
-        
-        // Update our own nickname if it's us
-        if let connection = server.connection, connection.currentNickname == oldNick {
-            // Connection handles its own nickname update
-        }
+        // Our own nickname is tracked by IRCConnection when the server echoes
+        // the NICK change back to us.
     }
     
     private func handleMode(_ message: IRCMessage, server: IRCServer) {
@@ -680,22 +797,29 @@ class ChatState: IRCConnectionDelegate {
         
         // Only handle channel modes
         guard target.hasPrefix("#") || target.hasPrefix("&"),
-              let channel = server.channels.first(where: { $0.name == target }) else { return }
-        
+              let channel = server.channel(named: target) else { return }
+
         // Parse mode changes (+o, -v, etc.)
         var adding = true
         var modeIndex = 2 // Parameter index for mode arguments
-        
+
+        // Non-membership modes that also consume an argument — their parameter
+        // must be skipped or later membership modes read the wrong nickname
+        // (e.g. "MODE #chan +bo mask nick" would op "mask").
+        let alwaysTakesArg: Set<Character> = ["b", "e", "I", "k", "f", "j"]
+        let takesArgWhenAdding: Set<Character> = ["l"]
+
         for char in modeString {
             switch char {
             case "+":
                 adding = true
             case "-":
                 adding = false
-            case "o", "v": // Op and Voice modes
+            case "q", "a", "o", "h", "v": // Membership modes (owner/admin/op/half-op/voice)
                 if modeIndex < message.parameters.count {
                     let nickname = message.parameters[modeIndex]
-                    if let userIndex = channel.users.firstIndex(where: { $0.nickname == nickname }) {
+                    modeIndex += 1
+                    if let userIndex = channel.userIndex(named: nickname) {
                         var user = channel.users[userIndex]
                         if adding {
                             user.modes.insert(char)
@@ -704,11 +828,13 @@ class ChatState: IRCConnectionDelegate {
                         }
                         channel.users[userIndex] = user
                     }
-                    modeIndex += 1
                 }
             default:
-                // Other modes don't affect user list
-                break
+                // Other modes don't affect the user list, but arg-consuming
+                // ones still advance the parameter index
+                if alwaysTakesArg.contains(char) || (adding && takesArgWhenAdding.contains(char)) {
+                    modeIndex += 1
+                }
             }
         }
         
@@ -731,10 +857,12 @@ class ChatState: IRCConnectionDelegate {
         let kickedUser = message.parameters[1]
         let reason = message.parameters.count >= 3 ? message.parameters[2] : "No reason given"
         
-        if let channel = server.channels.first(where: { $0.name == channelName }) {
+        if let channel = server.channel(named: channelName) {
             // Remove kicked user from channel
-            channel.users.removeAll { $0.nickname == kickedUser }
-            
+            if let userIndex = channel.userIndex(named: kickedUser) {
+                channel.users.remove(at: userIndex)
+            }
+
             // Add system message
             let kickMessage = IRCChatMessage(
                 sender: "System",
@@ -742,9 +870,10 @@ class ChatState: IRCConnectionDelegate {
                 type: .part
             )
             channel.appendMessage(kickMessage)
-            
+
             // If we were kicked, mark channel as not joined
-            if let connection = server.connection, kickedUser == connection.currentNickname {
+            if let connection = server.connection,
+               kickedUser.ircCasemapped == connection.currentNickname.ircCasemapped {
                 channel.isJoined = false
             }
         }
@@ -756,8 +885,8 @@ class ChatState: IRCConnectionDelegate {
         
         let channelName = message.parameters[0]
         let newTopic = message.parameters[1]
-        
-        if let channel = server.channels.first(where: { $0.name == channelName }) {
+
+        if let channel = server.channel(named: channelName) {
             channel.topic = newTopic
             
             // Add system message
@@ -782,7 +911,7 @@ class ChatState: IRCConnectionDelegate {
         let realName = message.parameters[5]
         
         // Display in all channels where this user is present
-        for channel in server.channels where channel.users.contains(where: { $0.nickname == nick }) {
+        for channel in server.channels where channel.hasUser(named: nick) {
             let whoisMessage = IRCChatMessage(
                 sender: "WHOIS",
                 content: "\(nick) is \(user)@\(host) (\(realName))",
@@ -800,7 +929,7 @@ class ChatState: IRCConnectionDelegate {
         let serverName = message.parameters[2]
         let serverInfo = message.parameters[3]
         
-        for channel in server.channels where channel.users.contains(where: { $0.nickname == nick }) {
+        for channel in server.channels where channel.hasUser(named: nick) {
             let whoisMessage = IRCChatMessage(
                 sender: "WHOIS",
                 content: "\(nick) is connected to \(serverName) (\(serverInfo))",
@@ -819,7 +948,7 @@ class ChatState: IRCConnectionDelegate {
         
         let idleTime = formatIdleTime(seconds: idleSeconds)
         
-        for channel in server.channels where channel.users.contains(where: { $0.nickname == nick }) {
+        for channel in server.channels where channel.hasUser(named: nick) {
             let whoisMessage = IRCChatMessage(
                 sender: "WHOIS",
                 content: "\(nick) has been idle for \(idleTime)",
@@ -836,7 +965,7 @@ class ChatState: IRCConnectionDelegate {
         let nick = message.parameters[1]
         let channels = message.parameters[2]
         
-        for channel in server.channels where channel.users.contains(where: { $0.nickname == nick }) {
+        for channel in server.channels where channel.hasUser(named: nick) {
             let whoisMessage = IRCChatMessage(
                 sender: "WHOIS",
                 content: "\(nick) is in channels: \(channels)",

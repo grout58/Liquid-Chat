@@ -132,25 +132,30 @@ actor ChannelLogger {
         // Track access time for cleanup
         lastAccessTime[logPath] = Date()
         
+        // A cached handle can go stale (file deleted, disk ejected) — on failure
+        // drop it and fall through to reopen instead of failing forever.
+        if let fileHandle = fileHandles[logPath] {
+            do {
+                try fileHandle.seekToEnd()
+                try fileHandle.write(contentsOf: data)
+                return
+            } catch {
+                try? fileHandle.close()
+                fileHandles.removeValue(forKey: logPath)
+            }
+        }
+
         do {
-            // Check if file exists
             if FileManager.default.fileExists(atPath: logPath) {
-                // Append to existing file
-                if let fileHandle = fileHandles[logPath] {
-                    // Use existing file handle
-                    try fileHandle.seekToEnd()
-                    try fileHandle.write(contentsOf: data)
-                } else {
-                    // Open new file handle
-                    let fileHandle = try FileHandle(forWritingTo: logURL)
-                    try fileHandle.seekToEnd()
-                    try fileHandle.write(contentsOf: data)
-                    fileHandles[logPath] = fileHandle
-                }
+                // Append to existing file with a fresh handle
+                let fileHandle = try FileHandle(forWritingTo: logURL)
+                try fileHandle.seekToEnd()
+                try fileHandle.write(contentsOf: data)
+                fileHandles[logPath] = fileHandle
             } else {
                 // Create new file
                 try data.write(to: logURL, options: .atomic)
-                
+
                 // Open file handle for future writes
                 if let fileHandle = try? FileHandle(forWritingTo: logURL) {
                     fileHandles[logPath] = fileHandle

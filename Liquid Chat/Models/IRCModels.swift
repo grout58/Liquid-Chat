@@ -8,6 +8,105 @@
 import Foundation
 import SwiftUI
 
+// MARK: - IRC String Semantics
+
+extension String {
+    /// Canonical form for IRC name comparison (RFC 1459 casemapping:
+    /// case-insensitive, with []\^ being the uppercase forms of {}|~).
+    var ircCasemapped: String {
+        lowercased()
+            .replacingOccurrences(of: "[", with: "{")
+            .replacingOccurrences(of: "]", with: "}")
+            .replacingOccurrences(of: "\\", with: "|")
+            .replacingOccurrences(of: "^", with: "~")
+    }
+
+    /// True when `nick` appears as a standalone word — "ed" must not match "edited".
+    /// Word characters include the specials IRC allows in nicknames.
+    func containsNick(_ nick: String) -> Bool {
+        guard !nick.isEmpty else { return false }
+        let nickChar = "[A-Za-z0-9_\\[\\]\\\\{}|^`-]"
+        let pattern = "(?<!\(nickChar))\(NSRegularExpression.escapedPattern(for: nick))(?!\(nickChar))"
+        return range(of: pattern, options: [.regularExpression, .caseInsensitive]) != nil
+    }
+}
+
+// MARK: - IRC Text Formatting
+
+/// Renders raw IRC message text for display: strips mIRC formatting control
+/// codes and linkifies URLs once, at ingest, so per-row rendering stays cheap.
+enum IRCTextFormatter {
+    private static let urlDetector = try? NSDataDetector(
+        types: NSTextCheckingResult.CheckingType.link.rawValue
+    )
+
+    static func render(_ raw: String) -> AttributedString {
+        let text = stripFormattingCodes(raw)
+        var attributed = AttributedString(text)
+
+        if let matches = urlDetector?.matches(in: text, range: NSRange(text.startIndex..., in: text)) {
+            for match in matches {
+                guard let url = match.url,
+                      let range = Range(match.range, in: text) else { continue }
+                let start = text.distance(from: text.startIndex, to: range.lowerBound)
+                let length = text.distance(from: range.lowerBound, to: range.upperBound)
+                guard let attrRange = attributed.characterRange(offset: start, length: length) else { continue }
+                attributed[attrRange].link = url
+                attributed[attrRange].foregroundColor = .blue
+                attributed[attrRange].underlineStyle = .single
+            }
+        }
+
+        return attributed
+    }
+
+    /// Strip mIRC formatting codes: bold (\x02), color (\x03 + digits), italic
+    /// (\x1D), underline (\x1F), strikethrough (\x1E), monospace (\x11),
+    /// reverse (\x16), reset (\x0F).
+    static func stripFormattingCodes(_ s: String) -> String {
+        guard s.contains(where: { $0.asciiValue.map { $0 < 0x20 && $0 != 0x09 } ?? false }) else { return s }
+        var out = ""
+        out.reserveCapacity(s.count)
+        var i = s.startIndex
+        while i < s.endIndex {
+            let c = s[i]
+            switch c {
+            case "\u{02}", "\u{1D}", "\u{1F}", "\u{1E}", "\u{11}", "\u{16}", "\u{0F}":
+                i = s.index(after: i)
+            case "\u{03}":
+                // Color: \x03[FG[,BG]] with 1–2 digits each
+                i = s.index(after: i)
+                var fgDigits = 0
+                while i < s.endIndex, s[i].isASCII, s[i].isNumber, fgDigits < 2 {
+                    i = s.index(after: i); fgDigits += 1
+                }
+                if fgDigits > 0, i < s.endIndex, s[i] == "," {
+                    var j = s.index(after: i)
+                    var bgDigits = 0
+                    while j < s.endIndex, s[j].isASCII, s[j].isNumber, bgDigits < 2 {
+                        j = s.index(after: j); bgDigits += 1
+                    }
+                    if bgDigits > 0 { i = j }   // consume ",NN"; a bare comma stays
+                }
+            default:
+                out.append(c)
+                i = s.index(after: i)
+            }
+        }
+        return out
+    }
+}
+
+extension AttributedString {
+    /// Convert a character offset + length into an AttributedString range.
+    func characterRange(offset: Int, length: Int) -> Range<AttributedString.Index>? {
+        guard offset >= 0, length >= 0, offset + length <= characters.count else { return nil }
+        let start = characters.index(startIndex, offsetBy: offset)
+        let end = characters.index(start, offsetBy: length)
+        return start..<end
+    }
+}
+
 /// Connection state for display purposes
 enum ServerConnectionState {
     case disconnected
@@ -47,39 +146,6 @@ enum ServerConnectionState {
     }
 }
 
-/// Thread-safe buffer actor for channel list updates
-/// Accumulates ALL entries and flushes ONCE to prevent MainActor saturation
-actor ChannelListBuffer {
-    private var buffer: [IRCChannelListEntry] = []
-    private weak var server: IRCServer?
-    
-    init(server: IRCServer) {
-        self.server = server
-    }
-    
-    /// Add entry to buffer (no automatic flushing)
-    func addEntry(_ entry: IRCChannelListEntry) {
-        buffer.append(entry)
-    }
-    
-    /// Flush all entries at once with sorting
-    func flush() async {
-        guard !buffer.isEmpty else { return }
-        
-        // Sort in background before MainActor hop
-        let sortedBatch = buffer.sorted { $0.userCount > $1.userCount }
-        buffer.removeAll()
-        
-        // Single MainActor hop for entire dataset
-        if let server = self.server {
-            await MainActor.run {
-                server.availableChannels = sortedBatch  // Replace, don't append
-            }
-            await ConsoleLogger.shared.log("✓ Loaded and sorted \(sortedBatch.count) channels", level: .info, category: "IRC")
-        }
-    }
-}
-
 /// Represents an IRC server
 @Observable
 class IRCServer: Identifiable {
@@ -103,15 +169,23 @@ class IRCServer: Identifiable {
 
     /// Pending reconnect task
     var reconnectTask: Task<Void, Never>?
-    
-    /// Actor-isolated buffer for thread-safe channel list updates
-    private var channelListBuffer: ChannelListBuffer!
-    
+
+    /// Buffer for LIST (322) entries. All IRC message handling runs on the
+    /// MainActor, so a plain array is race-free; @ObservationIgnored keeps the
+    /// thousands of appends from invalidating SwiftUI views.
+    @ObservationIgnored private var pendingChannelList: [IRCChannelListEntry] = []
+
     init(config: IRCServerConfig) {
         self.config = config
-        self.channelListBuffer = ChannelListBuffer(server: self)
     }
-    
+
+    /// Look up a channel by IRC name semantics (case-insensitive per RFC 1459
+    /// casemapping) — servers freely vary the case of channel and nick names.
+    func channel(named name: String) -> IRCChannel? {
+        let key = name.ircCasemapped
+        return channels.first { $0.name.ircCasemapped == key }
+    }
+
     /// Cancel any ongoing observation tasks
     func cancelObservation() {
         observationTask?.cancel()
@@ -123,20 +197,29 @@ class IRCServer: Identifiable {
         reconnectTask?.cancel()
         reconnectTask = nil
     }
-    
-    /// Add channel to buffer for batched updates
-    /// Thread-safe: Can be called from any thread without blocking
+
+    /// Buffer a LIST entry (called on the MainActor message path)
     func bufferChannelListEntry(_ entry: IRCChannelListEntry) {
-        // Simple Task - actor handles queuing internally
-        Task { [buffer = self.channelListBuffer] in
-            await buffer.addEntry(entry)
-        }
+        pendingChannelList.append(entry)
     }
-    
-    /// Flush all buffered entries at once
-    /// Thread-safe: Can be called from any thread
+
+    /// Discard buffered entries (start of a new LIST)
+    func clearChannelListBuffer() {
+        pendingChannelList.removeAll()
+    }
+
+    /// Sort the buffered entries off-main, then publish them in one update
     func flushChannelListBuffer() async {
-        await channelListBuffer.flush()
+        let snapshot = pendingChannelList
+        pendingChannelList = []
+        guard !snapshot.isEmpty else { return }
+
+        let sorted = await Task.detached(priority: .userInitiated) {
+            snapshot.sorted { $0.userCount > $1.userCount }
+        }.value
+
+        availableChannels = sorted  // Replace, don't append
+        await ConsoleLogger.shared.log("✓ Loaded and sorted \(sorted.count) channels", level: .info, category: "IRC")
     }
 }
 
@@ -177,14 +260,18 @@ class IRCChannel: Identifiable, Hashable {
         unreadCount += 1
 
         if let nick = currentNickname {
-            let text = String(message.content.characters).lowercased()
-            if text.contains(nick.lowercased()) {
+            let text = String(message.content.characters)
+            if text.containsNick(nick) {
                 hasMention = true
             }
         }
     }
-    
+
     var isJoined: Bool = false
+
+    /// True while a NAMES (353) burst is being received. The first reply of a
+    /// burst clears the stale user list; 366 (end of NAMES) resets the flag.
+    @ObservationIgnored var isReceivingNames: Bool = false
 
     /// Number of messages received while this channel was not selected.
     var unreadCount: Int = 0
@@ -201,6 +288,16 @@ class IRCChannel: Identifiable, Hashable {
     func markRead() {
         unreadCount = 0
         hasMention = false
+    }
+
+    /// Index of a user by IRC name semantics (case-insensitive).
+    func userIndex(named nick: String) -> Int? {
+        let key = nick.ircCasemapped
+        return users.firstIndex { $0.nickname.ircCasemapped == key }
+    }
+
+    func hasUser(named nick: String) -> Bool {
+        userIndex(named: nick) != nil
     }
     
     init(name: String, server: IRCServer) {
@@ -226,7 +323,11 @@ struct IRCUser: Identifiable, Hashable {
     var modes: Set<Character> = []
     
     var displayPrefix: String {
+        // Mode letters, highest rank first (owner, admin, op, half-op, voice)
+        if modes.contains("q") { return "~" }
+        if modes.contains("a") { return "&" }
         if modes.contains("o") { return "@" }
+        if modes.contains("h") { return "%" }
         if modes.contains("v") { return "+" }
         return ""
     }
@@ -262,7 +363,9 @@ struct IRCChatMessage: Identifiable {
     init(sender: String, content: String, type: MessageType = .message, timestamp: Date? = nil, batchID: String? = nil) {
         self.timestamp = timestamp ?? Date()
         self.sender = sender
-        self.content = AttributedString(content)
+        // Strip mIRC control codes and linkify once at ingest — per-row render
+        // then never re-runs detection over the whole history.
+        self.content = IRCTextFormatter.render(content)
         self.type = type
         self.batchID = batchID
     }

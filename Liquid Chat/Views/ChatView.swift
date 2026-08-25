@@ -576,7 +576,11 @@ struct MessageInputView: View {
     
     @FocusState private var isFocused: Bool
     @State private var tabCompletionIndex = 0
-    @State private var lastTabCompletionWord = ""
+    /// The partial word the user originally typed, kept across Tab presses so
+    /// repeated Tab cycles through all matches for the same stem.
+    @State private var completionStem: String?
+    /// Exactly what the last completion inserted, so it can be rolled back.
+    @State private var completionInsertedText: String?
     
     var body: some View {
         HStack(spacing: 12) {
@@ -596,8 +600,8 @@ struct MessageInputView: View {
                     return .handled
                 }
                 .onKeyPress(.tab) {
-                    handleTabCompletion()
-                    return .handled
+                    // .ignored when nothing completed keeps Tab usable for focus cycling
+                    handleTabCompletion() ? .handled : .ignored
                 }
             
             Button {
@@ -640,48 +644,53 @@ struct MessageInputView: View {
         case up, down
     }
     
-    private func handleTabCompletion() {
-        guard !users.isEmpty else { return }
-        
-        // Find the current word being typed
-        let cursorPosition = messageText.endIndex
-        var wordStart = messageText.startIndex
-        
-        // Find the start of the current word
-        for i in messageText.indices.reversed() {
-            if messageText[i].isWhitespace {
-                wordStart = messageText.index(after: i)
-                break
-            }
-        }
-        
-        let currentWord = String(messageText[wordStart..<cursorPosition])
-        
-        // If this is a new tab completion (word changed), reset the index
-        if currentWord != lastTabCompletionWord {
+    /// Returns true when a completion was applied.
+    private func handleTabCompletion() -> Bool {
+        guard !users.isEmpty else { return false }
+
+        // Continuing a cycle? Roll the previous insertion back to the stem
+        // so repeated Tab presses walk through every match.
+        if let inserted = completionInsertedText, let stem = completionStem,
+           messageText.hasSuffix(inserted) {
+            messageText.removeLast(inserted.count)
+            messageText.append(stem)
+        } else {
+            // New completion: the stem is the word being typed at the end
             tabCompletionIndex = 0
-            lastTabCompletionWord = currentWord
+            let stem: String
+            if let lastSpace = messageText.lastIndex(where: { $0.isWhitespace }) {
+                stem = String(messageText[messageText.index(after: lastSpace)...])
+            } else {
+                stem = messageText
+            }
+            guard !stem.isEmpty else { return false }
+            completionStem = stem
         }
-        
-        // Find matching nicknames
+
+        guard let stem = completionStem else { return false }
+
         let matches = users
             .map { $0.nickname }
-            .filter { $0.lowercased().hasPrefix(currentWord.lowercased()) }
+            .filter { $0.lowercased().hasPrefix(stem.lowercased()) }
             .sorted()
-        
-        guard !matches.isEmpty else { return }
-        
-        // Get the next match (cycle through)
+
+        guard !matches.isEmpty else {
+            completionStem = nil
+            completionInsertedText = nil
+            return false
+        }
+
         let match = matches[tabCompletionIndex % matches.count]
         tabCompletionIndex += 1
-        
-        // Replace the current word with the match
-        messageText.removeSubrange(wordStart..<cursorPosition)
-        
-        // Always append colon when tab-completing a nickname (IRC addressing convention)
-        messageText.insert(contentsOf: "\(match): ", at: wordStart)
-        
-        lastTabCompletionWord = match
+
+        // Colon only when addressing someone at the start of the line
+        let atLineStart = messageText == stem
+        let replacement = atLineStart ? "\(match): " : match
+
+        messageText.removeLast(stem.count)
+        messageText.append(replacement)
+        completionInsertedText = replacement
+        return true
     }
 }
 

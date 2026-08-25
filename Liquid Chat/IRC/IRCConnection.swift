@@ -122,18 +122,26 @@ class IRCConnection {
     private var receiveQueue: DispatchQueue
     private var sendQueue: DispatchQueue
     
-    // Capability negotiation state
+    // Capability negotiation state (mutated only on receiveQueue)
     private var capabilitiesRequested: Set<String> = []
     private var capabilitiesAcknowledged: Set<String> = []
+    private var advertisedCapabilities: Set<String> = []
     private var sentCapEnd = false
     private var capNegotiationTimer: DispatchWorkItem?
-    
+
     // Batch message handling (IRCv3)
     private var currentBatches: [String: [IRCMessage]] = [:]
-    
+    /// Safety valve: a batch the server never closes must not buffer unboundedly.
+    private let maxBatchBufferSize = 2000
+
     // Connection metadata
     private(set) var serverName: String?
+    /// The nickname the server knows us by. Mutated only on the main thread
+    /// (confirmed by 001 / NICK echoes) so SwiftUI observation stays race-free.
     private(set) var currentNickname: String
+    /// The nickname most recently sent in a NICK command, before server confirmation.
+    /// Owned by receiveQueue (registration-time 433 retries).
+    private var attemptedNickname: String
     
     // Delegate for handling IRC messages
     weak var delegate: IRCConnectionDelegate?
@@ -141,6 +149,7 @@ class IRCConnection {
     init(config: IRCServerConfig) {
         self.config = config
         self.currentNickname = config.nickname
+        self.attemptedNickname = config.nickname
         self.receiveQueue = DispatchQueue(label: "com.liquidchat.irc.receive", qos: .userInitiated)
         self.sendQueue = DispatchQueue(label: "com.liquidchat.irc.send", qos: .userInitiated)
     }
@@ -197,8 +206,12 @@ class IRCConnection {
         capNegotiationTimer?.cancel()
         capNegotiationTimer = nil
         send(command: "QUIT", parameters: [message])
-        connection?.cancel()
+        let closingConnection = connection
         connection = nil
+        // Give the QUIT a moment to flush before tearing down the socket.
+        receiveQueue.asyncAfter(deadline: .now() + 0.25) {
+            closingConnection?.cancel()
+        }
         state = .disconnected
     }
     
@@ -216,6 +229,10 @@ class IRCConnection {
                 DispatchQueue.main.async { [weak self] in self?.handleConnectionReady() }
             case .failed(let error):
                 log("Connection failed: \(error.localizedDescription)", level: .error)
+                self.flushPendingBatches()
+                // Cancel to release Network.framework resources; the .cancelled
+                // branch below then reports the disconnect.
+                self.connection?.cancel()
                 DispatchQueue.main.async { [weak self] in
                     guard let self else { return }
                     self.state = .error(error.localizedDescription)
@@ -223,6 +240,7 @@ class IRCConnection {
                 }
             case .cancelled:
                 log("Connection cancelled", level: .info)
+                self.flushPendingBatches()
                 DispatchQueue.main.async { [weak self] in
                     guard let self else { return }
                     self.state = .disconnected
@@ -272,20 +290,21 @@ class IRCConnection {
             }
         }
         if let timer = capNegotiationTimer {
-            DispatchQueue.global().asyncAfter(deadline: .now() + IRC.capNegotiationTimeout, execute: timer)
+            // Run on receiveQueue so it never races the CAP handlers
+            receiveQueue.asyncAfter(deadline: .now() + IRC.capNegotiationTimeout, execute: timer)
         }
-        
+
         // Step 2: Send PASS if using password authentication
+        // (send() adds the ":" trailing marker itself when the password has spaces)
         if let password = config.password, config.authMethod == .password {
-            // Only prefix with colon if password contains spaces (per IRC RFC)
-            let formattedPassword = password.contains(" ") ? ":\(password)" : password
             log("Sending PASS (hidden)", level: .debug)
-            send(command: "PASS", parameters: [formattedPassword])
+            send(command: "PASS", parameters: [password])
         }
-        
+
         // Step 3: Send NICK and USER commands
         // Sanitize nickname - remove spaces and invalid characters
         let sanitizedNickname = config.nickname.replacingOccurrences(of: " ", with: "_")
+        receiveQueue.async { self.attemptedNickname = sanitizedNickname }
         send(command: "NICK", parameters: [sanitizedNickname])
         send(command: "USER", parameters: [
             config.username,
@@ -296,22 +315,33 @@ class IRCConnection {
     }
     
     // MARK: - Message Sending
-    
+
+    /// Strip characters that would let a parameter break out of its IRC line
+    /// (CR/LF injection) or terminate it early.
+    private func sanitizedParameter(_ parameter: String) -> String {
+        parameter
+            .replacingOccurrences(of: "\r", with: " ")
+            .replacingOccurrences(of: "\n", with: " ")
+            .replacingOccurrences(of: "\0", with: "")
+    }
+
     /// Send a raw IRC command
     func send(command: String, parameters: [String] = []) {
         var message = command
-        
+
         if !parameters.isEmpty {
             let lastIndex = parameters.count - 1
-            for (index, param) in parameters.enumerated() {
-                if index == lastIndex && (param.contains(" ") || param.hasPrefix(":")) {
+            for (index, rawParam) in parameters.enumerated() {
+                let param = sanitizedParameter(rawParam)
+                if index == lastIndex && (param.contains(" ") || param.hasPrefix(":") || param.isEmpty) {
                     message += " :\(param)"
                 } else {
-                    message += " \(param)"
+                    // Middle parameters must not contain spaces (RFC 2812 §2.3.1)
+                    message += " \(param.replacingOccurrences(of: " ", with: "_"))"
                 }
             }
         }
-        
+
         send(raw: message)
     }
     
@@ -337,34 +367,50 @@ class IRCConnection {
     private func receiveMessages() {
         connection?.receive(minimumIncompleteLength: 1, maximumLength: 4096) { [weak self] data, _, isComplete, error in
             guard let self = self else { return }
-            
+
             if let data = data, !data.isEmpty {
                 self.handleReceivedData(data)
             }
-            
+
             if let error = error {
                 self.delegate?.connection(self, didEncounterError: error)
+                self.connection?.cancel()
                 return
             }
-            
-            if !isComplete {
-                self.receiveMessages()
+
+            if isComplete {
+                // Server closed its side (EOF) — treat as a disconnect so the UI
+                // and reconnect logic see it, instead of a silent dead socket.
+                log("Server closed the connection (EOF)", level: .warning)
+                self.connection?.cancel()
+                return
             }
+
+            self.receiveMessages()
         }
     }
-    
+
     private var receiveBuffer = Data()
-    
+
     private func handleReceivedData(_ data: Data) {
         receiveBuffer.append(data)
-        
+
+        // A peer that never sends CRLF must not grow the buffer unboundedly
+        if receiveBuffer.count > 1_048_576 {
+            log("Receive buffer exceeded 1MB without a line terminator — dropping buffered data", level: .error)
+            receiveBuffer.removeAll(keepingCapacity: false)
+            return
+        }
+
         // Split by CRLF
         guard let crlfData = "\r\n".data(using: .utf8) else { return }
         while let range = receiveBuffer.range(of: crlfData) {
             let messageData = receiveBuffer.subdata(in: 0..<range.lowerBound)
             receiveBuffer.removeSubrange(0..<range.upperBound)
-            
-            if let messageString = String(data: messageData, encoding: .utf8) {
+
+            // Fall back to Latin-1 for legacy-encoded lines rather than dropping them
+            if let messageString = String(data: messageData, encoding: .utf8)
+                ?? String(data: messageData, encoding: .isoLatin1) {
                 handleIRCMessage(messageString)
             }
         }
@@ -394,48 +440,77 @@ class IRCConnection {
         // Handle server-specific messages
         switch parsed.command {
         case "PING":
-            // Respond to PING immediately
-            if let server = parsed.parameters.first {
-                send(command: "PONG", parameters: [server])
+            // Respond to PING immediately (some servers/bouncers send it bare)
+            if let token = parsed.parameters.first {
+                send(command: "PONG", parameters: [token])
+            } else {
+                send(command: "PONG")
             }
-            
+
         case "CAP":
             handleCapabilityResponse(parsed)
-            
+
         case "AUTHENTICATE":
             handleAuthenticateResponse(parsed)
-            
-        case "900": // RPL_LOGGEDIN
+
+        case "900", "903": // RPL_LOGGEDIN, RPL_SASLSUCCESS
             log("✓ SASL authentication successful", level: .info)
             endCapabilityNegotiation()
-            
-        case "904", "905": // ERR_SASLFAIL, ERR_SASLTOOLONG
-            log("✗ SASL authentication failed", level: .error)
+
+        case "902", "904", "905", "906", "907", "908": // SASL failure / abort family
+            log("✗ SASL authentication failed (\(parsed.command))", level: .error)
             endCapabilityNegotiation()
-            
+
         case "001": // RPL_WELCOME
             log("✓ Registered successfully", level: .info)
             let prefix = parsed.prefix
+            // The server addresses 001 to our accepted nickname — authoritative.
+            let confirmedNick = parsed.parameters.first
+            // Now that registration is complete, PRIVMSG to ZNC modules is legal.
+            if capabilitiesAcknowledged.contains("znc.in/playback") {
+                log("Requesting ZNC playback history", level: .info)
+                send(raw: "PRIVMSG *playback :PLAY * 0")
+            }
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
+                if let confirmedNick { self.currentNickname = confirmedNick }
                 self.state = .registered
                 self.serverName = prefix
                 self.delegate?.connectionDidRegister(self)
             }
             return  // Delegate call moved to main thread above
-            
+
+        case "NICK":
+            // Track our own confirmed nick changes
+            if let oldNick = parsed.nick, let newNick = parsed.parameters.first,
+               oldNick == currentNickname || oldNick == attemptedNickname {
+                DispatchQueue.main.async { [weak self] in
+                    self?.currentNickname = newNick
+                }
+            }
+
         case "433": // ERR_NICKNAMEINUSE
             log("Nickname in use, trying alternate", level: .warning)
             handleNicknameInUse()
-            
+
         default:
             break
         }
         
         // Check if this message is part of a batch
-        if let batchID = parsed.batchID, currentBatches[batchID] != nil {
-            // Add to batch instead of forwarding immediately
-            currentBatches[batchID]?.append(parsed)
+        if let batchID = parsed.batchID, var buffered = currentBatches[batchID] {
+            if buffered.count >= maxBatchBufferSize {
+                // Runaway/never-closed batch: flush what we have and stop buffering
+                log("Batch \(batchID) exceeded \(maxBatchBufferSize) messages — flushing early", level: .warning)
+                currentBatches.removeValue(forKey: batchID)
+                for msg in buffered {
+                    delegate?.connection(self, didReceiveMessage: msg)
+                }
+                delegate?.connection(self, didReceiveMessage: parsed)
+            } else {
+                buffered.append(parsed)
+                currentBatches[batchID] = buffered
+            }
             return
         }
         
@@ -457,42 +532,34 @@ class IRCConnection {
             if message.parameters.count >= 3 {
                 let isMultiline = message.parameters.count >= 4 && message.parameters[2] == "*"
                 let capString = isMultiline ? message.parameters[3] : message.parameters[2]
-                let caps = capString.split(separator: " ").map(String.init)
-                
+                // CAP LS 302 entries can carry values ("sasl=PLAIN,EXTERNAL") — key precedes '='
+                let caps = capString.split(separator: " ").compactMap {
+                    $0.split(separator: "=", maxSplits: 1).first.map(String.init)
+                }
+                advertisedCapabilities.formUnion(caps)
+
                 log("Available capabilities: \(caps.joined(separator: ", "))\(isMultiline ? " (more coming...)" : "")", level: .debug)
-                
-                // If this is multiline, wait for the final LS
+
+                // Accumulate across multiline LS replies; act only on the final one
                 if isMultiline {
                     return
                 }
-                
+
                 // Build list of capabilities we want to request
                 var requestedCaps: [String] = []
-                
+
                 // Request SASL if available and needed
-                if caps.contains("sasl") && (config.authMethod == .sasl || config.authMethod == .saslExternal) {
+                if advertisedCapabilities.contains("sasl")
+                    && (config.authMethod == .sasl || config.authMethod == .saslExternal) {
                     requestedCaps.append("sasl")
                 }
-                
-                // Request IRCv3 capabilities
-                if caps.contains("multi-prefix") {
-                    requestedCaps.append("multi-prefix")
+
+                // Request IRCv3 + bouncer capabilities
+                for cap in ["multi-prefix", "server-time", "message-tags", "batch", "znc.in/playback"]
+                    where advertisedCapabilities.contains(cap) {
+                    requestedCaps.append(cap)
                 }
-                if caps.contains("server-time") {
-                    requestedCaps.append("server-time")
-                }
-                if caps.contains("message-tags") {
-                    requestedCaps.append("message-tags")
-                }
-                if caps.contains("batch") {
-                    requestedCaps.append("batch")
-                }
-                
-                // ZNC bouncer support
-                if caps.contains("znc.in/playback") {
-                    requestedCaps.append("znc.in/playback")
-                }
-                
+
                 if !requestedCaps.isEmpty {
                     log("Requesting capabilities: \(requestedCaps.joined(separator: ", "))", level: .info)
                     send(command: "CAP", parameters: ["REQ", requestedCaps.joined(separator: " ")])
@@ -532,11 +599,8 @@ class IRCConnection {
                     }
                 }
                 
-                // Request ZNC playback if available
-                if caps.contains("znc.in/playback") {
-                    log("Requesting ZNC playback history", level: .info)
-                    send(raw: "PRIVMSG *playback :PLAY * 0")
-                }
+                // Note: ZNC playback is requested after 001 (RPL_WELCOME) —
+                // PRIVMSG before registration is rejected with 451.
             }
             
         case "NAK":
@@ -628,10 +692,24 @@ class IRCConnection {
         }
     }
     
+    /// Deliver any messages still buffered in open batches (e.g. the server
+    /// dropped mid-playback) so they aren't silently lost.
+    private func flushPendingBatches() {
+        guard !currentBatches.isEmpty else { return }
+        for (batchID, messages) in currentBatches {
+            log("Flushing \(messages.count) message(s) from unterminated batch \(batchID)", level: .warning)
+            for msg in messages {
+                delegate?.connection(self, didReceiveMessage: msg)
+            }
+        }
+        currentBatches.removeAll()
+    }
+
     private func handleNicknameInUse() {
-        // Add underscore to nickname and try again
-        currentNickname += "_"
-        send(command: "NICK", parameters: [currentNickname])
+        // Track the attempt separately — currentNickname only changes once the
+        // server confirms (001 or a NICK echo).
+        attemptedNickname += "_"
+        send(command: "NICK", parameters: [attemptedNickname])
     }
     
     // MARK: - Channel Operations
@@ -653,7 +731,22 @@ class IRCConnection {
     }
     
     func sendMessage(_ message: String, to target: String) {
-        send(command: "PRIVMSG", parameters: [target, message])
+        // One PRIVMSG per line, chunked to fit the 512-byte frame with headroom
+        // for the ":nick!user@host PRIVMSG target :" prefix the server relays.
+        let overhead = 100 + target.utf8.count
+        let maxPayloadBytes = max(64, 510 - overhead)
+
+        for line in message.split(whereSeparator: \.isNewline) {
+            var rest = Substring(line)
+            while !rest.isEmpty {
+                var end = rest.endIndex
+                while rest[rest.startIndex..<end].utf8.count > maxPayloadBytes {
+                    end = rest.index(before: end)
+                }
+                send(command: "PRIVMSG", parameters: [target, String(rest[rest.startIndex..<end])])
+                rest = rest[end...]
+            }
+        }
     }
 }
 

@@ -82,20 +82,26 @@ class IRCCommandHandler {
             guard msgParts.count == 2 else { return }
             let target = String(msgParts[0])
             let message = String(msgParts[1])
-            connection.sendMessage(message, to: target)
-            
+            if let chatState {
+                // Echo into the query channel so the sender can see what they sent
+                chatState.sendPrivateMessage(message, to: target, on: channel.server)
+            } else {
+                connection.sendMessage(message, to: target)
+            }
+
         case "me":
             guard !args.isEmpty else { return }
             let actionMessage = "\u{01}ACTION \(args)\u{01}"
             connection.sendMessage(actionMessage, to: channel.name)
-            
-            // Add to local history
+
+            // Add to local history (isActive: our own action must not mark
+            // the channel we're typing in as unread)
             let message = IRCChatMessage(
                 sender: connection.currentNickname,
                 content: args,
                 type: .action
             )
-            channel.appendMessage(message)
+            channel.appendMessage(message, isActive: true)
             
         case "notice":
             let noticeParts = args.split(separator: " ", maxSplits: 1)
@@ -152,7 +158,13 @@ class IRCCommandHandler {
             
         case "quit":
             let quitMessage = args.isEmpty ? "Leaving" : args
-            connection.disconnect(message: quitMessage)
+            if let chatState {
+                // Route through ChatState so the disconnect is marked manual —
+                // otherwise auto-reconnect brings the user right back.
+                chatState.disconnectFromServer(channel.server, message: quitMessage)
+            } else {
+                connection.disconnect(message: quitMessage)
+            }
             
         case "away":
             if args.isEmpty {

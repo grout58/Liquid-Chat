@@ -36,11 +36,14 @@ struct IRCMessage {
         tags["batch"]
     }
     
-    /// IRC user mask components
+    /// IRC user mask components — prefix forms: "nick", "nick@host",
+    /// "nick!user@host", or a bare server name.
     var nick: String? {
-        prefix?.components(separatedBy: "!").first
+        guard let prefix else { return nil }
+        let end = prefix.firstIndex { $0 == "!" || $0 == "@" } ?? prefix.endIndex
+        return String(prefix[..<end])
     }
-    
+
     var user: String? {
         guard let prefix = prefix, let atIndex = prefix.firstIndex(of: "@") else { return nil }
         let beforeAt = prefix[..<atIndex]
@@ -49,9 +52,10 @@ struct IRCMessage {
         }
         return nil
     }
-    
+
     var host: String? {
-        prefix?.components(separatedBy: "@").last
+        guard let prefix, let atIndex = prefix.firstIndex(of: "@") else { return nil }
+        return String(prefix[prefix.index(after: atIndex)...])
     }
     
     /// Parse an IRC message from a raw string (RFC 1459 format with IRCv3 tags)
@@ -70,7 +74,7 @@ struct IRCMessage {
             for pair in tagPairs {
                 let components = pair.split(separator: "=", maxSplits: 1)
                 if components.count == 2 {
-                    tags[String(components[0])] = String(components[1])
+                    tags[String(components[0])] = unescapeTagValue(components[1])
                 } else if components.count == 1 {
                     tags[String(components[0])] = ""
                 }
@@ -86,25 +90,41 @@ struct IRCMessage {
             remainder = String(remainder[remainder.index(after: spaceIndex)...])
         }
         
-        // Remove leading spaces
-        remainder = remainder.trimmingCharacters(in: .whitespaces)
-        
-        // Parse command
-        guard let commandEnd = remainder.firstIndex(of: " ") ?? remainder.indices.last else {
-            return IRCMessage(raw: raw, prefix: prefix, command: remainder.uppercased(), parameters: [], tags: tags)
+        // Remove leading spaces only — a trailing parameter's own trailing
+        // whitespace is significant and must survive
+        while remainder.hasPrefix(" ") {
+            remainder.removeFirst()
         }
-        
-        let command = String(remainder[..<commandEnd]).uppercased()
-        remainder = commandEnd < remainder.endIndex 
-            ? String(remainder[remainder.index(after: commandEnd)...])
-            : ""
-        
+
+        // Parse command
+        guard !remainder.isEmpty else { return nil }
+
+        let command: String
+        if let commandEnd = remainder.firstIndex(of: " ") {
+            command = String(remainder[..<commandEnd]).uppercased()
+            remainder = String(remainder[remainder.index(after: commandEnd)...])
+        } else {
+            // Bare command with no parameters (e.g. "PING")
+            let bare = remainder.uppercased()
+            guard isValidCommand(bare) else { return nil }
+            return IRCMessage(raw: raw, prefix: prefix, command: bare, parameters: [], tags: tags)
+        }
+
+        // RFC 2812 §2.3.1: a command is a letter sequence or a 3-digit numeric —
+        // anything else means the line is malformed (e.g. a prefix or tag
+        // section that ran into the command with no separating space).
+        guard isValidCommand(command) else { return nil }
+
         // Parse parameters
         var parameters: [String] = []
-        
+
         while !remainder.isEmpty {
-            remainder = remainder.trimmingCharacters(in: .whitespaces)
-            
+            // Skip separating spaces only — trailing content must stay intact
+            while remainder.hasPrefix(" ") {
+                remainder.removeFirst()
+            }
+            guard !remainder.isEmpty else { break }
+
             if remainder.hasPrefix(":") {
                 // Trailing parameter (rest of the message)
                 parameters.append(String(remainder.dropFirst()))
@@ -122,28 +142,60 @@ struct IRCMessage {
         
         return IRCMessage(raw: raw, prefix: prefix, command: command, parameters: parameters, tags: tags)
     }
-    
-    /// Format an IRC message for sending
+
+    /// A command is 1+ ASCII letters or exactly 3 digits (RFC 2812 §2.3.1).
+    private static func isValidCommand(_ command: String) -> Bool {
+        guard !command.isEmpty else { return false }
+        if command.allSatisfy({ $0.isASCII && $0.isLetter }) { return true }
+        return command.count == 3 && command.allSatisfy { $0.isASCII && $0.isNumber }
+    }
+
+    /// Unescape an IRCv3 message-tag value (\: → ; \s → space, \\, \r, \n)
+    private static func unescapeTagValue(_ value: Substring) -> String {
+        guard value.contains("\\") else { return String(value) }
+        var result = ""
+        result.reserveCapacity(value.count)
+        var iterator = value.makeIterator()
+        while let char = iterator.next() {
+            guard char == "\\", let next = iterator.next() else {
+                result.append(char)
+                continue
+            }
+            switch next {
+            case ":": result.append(";")
+            case "s": result.append(" ")
+            case "r": result.append("\r")
+            case "n": result.append("\n")
+            case "\\": result.append("\\")
+            default: result.append(next)   // spec: drop the backslash, keep the char
+            }
+        }
+        return result
+    }
+
+    /// Format an IRC message for sending.
+    /// The trailing parameter is always colon-prefixed — that is legal for every
+    /// command and keeps parse→format round trips stable for trailing content.
     static func format(command: String, parameters: [String] = [], prefix: String? = nil) -> String {
         var message = ""
-        
+
         if let prefix = prefix {
             message = ":\(prefix) "
         }
-        
+
         message += command
-        
+
         if !parameters.isEmpty {
             let lastIndex = parameters.count - 1
             for (index, param) in parameters.enumerated() {
-                if index == lastIndex && (param.contains(" ") || param.hasPrefix(":")) {
+                if index == lastIndex {
                     message += " :\(param)"
                 } else {
                     message += " \(param)"
                 }
             }
         }
-        
+
         return message
     }
 }

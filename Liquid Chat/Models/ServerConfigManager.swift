@@ -9,6 +9,8 @@
 import Foundation
 
 /// Manages persistence and retrieval of saved server configurations.
+/// MainActor: savedServers mutations are not thread-safe — every caller is UI code.
+@MainActor
 @Observable
 class ServerConfigManager {
     static let shared = ServerConfigManager()

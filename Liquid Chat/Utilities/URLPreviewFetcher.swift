@@ -35,6 +35,13 @@ actor URLPreviewFetcher {
     // Compiled regex cache keyed by pattern string, to avoid recompilation on every call.
     private var regexCache: [String: NSRegularExpression] = [:]
 
+    // Requests already running, so N visible rows with the same URL share one fetch.
+    private var inFlight: [URL: Task<URLPreview?, Never>] = [:]
+
+    // Hard cap on how much of a page is downloaded for metadata — protects
+    // against a link to a multi-gigabyte resource flooding memory.
+    private let maxDownloadBytes = 512 * 1024
+
     private static let urlSession: URLSession = {
         let config = URLSessionConfiguration.default
         config.timeoutIntervalForRequest = 10
@@ -46,8 +53,12 @@ actor URLPreviewFetcher {
     
     /// Fetch preview data for a URL
     func fetchPreview(for url: URL) async -> URLPreview? {
-        // Check cache first
+        // Check cache first (touch the entry so eviction is true LRU)
         if let cached = cache[url] {
+            if let index = cacheOrder.firstIndex(of: url) {
+                cacheOrder.remove(at: index)
+                cacheOrder.append(url)
+            }
             return cached
         }
 
@@ -64,20 +75,51 @@ actor URLPreviewFetcher {
             return preview
         }
 
-        // Fetch HTML and parse metadata
+        // Coalesce concurrent requests for the same URL into one fetch
+        if let running = inFlight[url] {
+            return await running.value
+        }
+
+        let maxBytes = maxDownloadBytes
+        let fetchTask = Task<URLPreview?, Never> {
+            guard let data = await Self.fetchHTMLHead(url: url, maxBytes: maxBytes),
+                  let html = String(data: data, encoding: .utf8) else { return nil }
+            return self.parseHTMLMetadata(html: html, url: url)
+        }
+        inFlight[url] = fetchTask
+        let preview = await fetchTask.value
+        inFlight[url] = nil
+
+        store(preview, for: url)
+        return preview
+    }
+
+    /// Download at most `maxBytes` of an HTML page. Non-HTML responses are
+    /// refused — metadata only ever lives in HTML, and this is what stops a
+    /// posted link to a huge binary from being downloaded at all.
+    private static func fetchHTMLHead(url: URL, maxBytes: Int) async -> Data? {
         do {
-            let (data, _) = try await Self.urlSession.data(from: url)
-            
-            guard let html = String(data: data, encoding: .utf8) else {
+            let (bytes, response) = try await urlSession.bytes(from: url)
+
+            if let http = response as? HTTPURLResponse {
+                guard (200..<300).contains(http.statusCode) else { return nil }
+            }
+            let mimeType = response.mimeType ?? ""
+            guard mimeType.isEmpty || mimeType.hasPrefix("text/html") || mimeType.hasPrefix("application/xhtml") else {
                 return nil
             }
-            
-            let preview = parseHTMLMetadata(html: html, url: url)
-            store(preview, for: url)
-            return preview
-            
+
+            var data = Data()
+            data.reserveCapacity(min(maxBytes, 64 * 1024))
+            for try await byte in bytes {
+                data.append(byte)
+                if data.count >= maxBytes { break }
+            }
+            return data
         } catch {
-            await ConsoleLogger.shared.log("Failed to fetch URL preview: \(error.localizedDescription)", level: .warning, category: "URLPreview")
+            Task {
+                await ConsoleLogger.shared.log("Failed to fetch URL preview: \(error.localizedDescription)", level: .warning, category: "URLPreview")
+            }
             return nil
         }
     }
@@ -201,13 +243,15 @@ actor URLPreviewFetcher {
     /// - Parameter text: Text containing HTML entities
     /// - Returns: Decoded text
     private func decodeHTMLEntities(_ text: String) -> String {
+        // &amp; must decode LAST or "&amp;lt;" double-decodes into "<"
         text
             .trimmingCharacters(in: .whitespacesAndNewlines)
-            .replacingOccurrences(of: "&amp;", with: "&")
             .replacingOccurrences(of: "&quot;", with: "\"")
             .replacingOccurrences(of: "&lt;", with: "<")
             .replacingOccurrences(of: "&gt;", with: ">")
             .replacingOccurrences(of: "&apos;", with: "'")
+            .replacingOccurrences(of: "&#39;", with: "'")
+            .replacingOccurrences(of: "&amp;", with: "&")
     }
 }
 
