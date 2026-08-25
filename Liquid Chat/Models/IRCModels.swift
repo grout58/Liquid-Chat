@@ -158,6 +158,9 @@ class IRCServer: Identifiable {
     var availableChannels: [IRCChannelListEntry] = []
     var isLoadingChannelList: Bool = false
 
+    /// What this server advertised in RPL_ISUPPORT (005); defaults until then.
+    var isupport = IRCISupport()
+
     /// Task for observing connection state changes (can be cancelled)
     var observationTask: Task<Void, Never>?
 

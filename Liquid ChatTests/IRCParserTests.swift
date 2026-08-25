@@ -521,3 +521,75 @@ struct IRCStringSemanticsTests {
         #expect(String(message.content.characters) == "waves hello")
     }
 }
+
+// MARK: - ISUPPORT (005) Tests
+
+@Suite("ISUPPORT Parsing Tests")
+struct IRCISupportTests {
+
+    @Test("PREFIX token maps symbols to mode letters in rank order")
+    func prefixToken() throws {
+        var isupport = IRCISupport()
+        isupport.apply(token: "PREFIX=(ov)@+")
+
+        #expect(isupport.prefixModes == ["o", "v"])
+        #expect(isupport.prefixSymbols == ["@", "+"])
+        #expect(isupport.symbolToMode["@"] == "o")
+        #expect(isupport.symbolToMode["+"] == "v")
+        #expect(isupport.symbolToMode["~"] == nil)   // not advertised anymore
+    }
+
+    @Test("Malformed PREFIX is ignored, keeping defaults")
+    func malformedPrefix() throws {
+        var isupport = IRCISupport()
+        isupport.apply(token: "PREFIX=broken")
+        isupport.apply(token: "PREFIX=(ov)@")   // count mismatch
+
+        #expect(isupport.symbolToMode["@"] == "o")   // default mapping intact
+        #expect(isupport.symbolToMode["~"] == "q")
+    }
+
+    @Test("CHANMODES categories drive argument consumption")
+    func chanmodesToken() throws {
+        var isupport = IRCISupport()
+        isupport.apply(token: "CHANMODES=beI,k,l,imnpst")
+
+        // A and B always take an argument
+        #expect(isupport.modeTakesArgument("b", whenAdding: true))
+        #expect(isupport.modeTakesArgument("b", whenAdding: false))
+        #expect(isupport.modeTakesArgument("k", whenAdding: false))
+        // C only when adding
+        #expect(isupport.modeTakesArgument("l", whenAdding: true))
+        #expect(!isupport.modeTakesArgument("l", whenAdding: false))
+        // D never
+        #expect(!isupport.modeTakesArgument("m", whenAdding: true))
+        // Membership modes always
+        #expect(isupport.modeTakesArgument("o", whenAdding: false))
+    }
+
+    @Test("CHANTYPES controls channel-name detection")
+    func chantypesToken() throws {
+        var isupport = IRCISupport()
+        #expect(isupport.isChannelName("#swift"))
+        #expect(isupport.isChannelName("&local"))
+        #expect(!isupport.isChannelName("alice"))
+
+        isupport.apply(token: "CHANTYPES=#")
+        #expect(isupport.isChannelName("#swift"))
+        #expect(!isupport.isChannelName("&local"))
+
+        isupport.apply(token: "CHANTYPES=")   // empty value ignored
+        #expect(isupport.isChannelName("#swift"))
+    }
+
+    @Test("NETWORK and CASEMAPPING values are stored")
+    func miscTokens() throws {
+        var isupport = IRCISupport()
+        isupport.apply(token: "NETWORK=Libera.Chat")
+        isupport.apply(token: "CASEMAPPING=ASCII")
+        isupport.apply(token: "MONITOR")           // valueless token: no crash
+
+        #expect(isupport.network == "Libera.Chat")
+        #expect(isupport.casemapping == "ascii")
+    }
+}

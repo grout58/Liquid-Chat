@@ -23,6 +23,9 @@ enum IRC {
     
     /// PING interval for keepalive in seconds
     static let pingInterval: TimeInterval = 60
+
+    /// How long an unanswered keepalive PING marks the connection dead
+    static let pingTimeout: TimeInterval = 120
     
     /// Maximum number of command history items to store
     static let maxCommandHistory = 50

@@ -134,6 +134,14 @@ class IRCConnection {
     /// Safety valve: a batch the server never closes must not buffer unboundedly.
     private let maxBatchBufferSize = 2000
 
+    // Keepalive state (owned by receiveQueue). A NAT path can die without EOF
+    // or error — only an unanswered PING reveals it.
+    private var keepaliveTimer: DispatchSourceTimer?
+    private var lastActivity = Date()
+    private var awaitingPongSince: Date?
+    /// Round-trip time of the last keepalive PING, for display. Main-thread.
+    private(set) var lastLagMs: Int?
+
     // Connection metadata
     private(set) var serverName: String?
     /// The nickname the server knows us by. Mutated only on the main thread
@@ -205,6 +213,7 @@ class IRCConnection {
     func disconnect(message: String = "Leaving") {
         capNegotiationTimer?.cancel()
         capNegotiationTimer = nil
+        receiveQueue.async { self.stopKeepalive() }
         send(command: "QUIT", parameters: [message])
         let closingConnection = connection
         connection = nil
@@ -229,6 +238,7 @@ class IRCConnection {
                 DispatchQueue.main.async { [weak self] in self?.handleConnectionReady() }
             case .failed(let error):
                 log("Connection failed: \(error.localizedDescription)", level: .error)
+                self.stopKeepalive()
                 self.flushPendingBatches()
                 // Cancel to release Network.framework resources; the .cancelled
                 // branch below then reports the disconnect.
@@ -240,6 +250,7 @@ class IRCConnection {
                 }
             case .cancelled:
                 log("Connection cancelled", level: .info)
+                self.stopKeepalive()
                 self.flushPendingBatches()
                 DispatchQueue.main.async { [weak self] in
                     guard let self else { return }
@@ -394,6 +405,7 @@ class IRCConnection {
 
     private func handleReceivedData(_ data: Data) {
         receiveBuffer.append(data)
+        lastActivity = Date()
 
         // A peer that never sends CRLF must not grow the buffer unboundedly
         if receiveBuffer.count > 1_048_576 {
@@ -447,6 +459,16 @@ class IRCConnection {
                 send(command: "PONG")
             }
 
+        case "PONG":
+            if let waitingSince = awaitingPongSince {
+                let lag = Int(Date().timeIntervalSince(waitingSince) * 1000)
+                awaitingPongSince = nil
+                log("Lag: \(lag)ms", level: .debug)
+                DispatchQueue.main.async { [weak self] in
+                    self?.lastLagMs = lag
+                }
+            }
+
         case "CAP":
             handleCapabilityResponse(parsed)
 
@@ -471,6 +493,7 @@ class IRCConnection {
                 log("Requesting ZNC playback history", level: .info)
                 send(raw: "PRIVMSG *playback :PLAY * 0")
             }
+            startKeepalive()
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
                 if let confirmedNick { self.currentNickname = confirmedNick }
@@ -692,6 +715,45 @@ class IRCConnection {
         }
     }
     
+    // MARK: - Keepalive
+
+    /// Start the post-registration keepalive: PING when the line has been
+    /// quiet for pingInterval, and declare the connection dead when a PING
+    /// goes unanswered for pingTimeout. Runs on receiveQueue.
+    private func startKeepalive() {
+        keepaliveTimer?.cancel()
+        lastActivity = Date()
+        awaitingPongSince = nil
+
+        let timer = DispatchSource.makeTimerSource(queue: receiveQueue)
+        timer.schedule(deadline: .now() + IRC.pingInterval, repeating: IRC.pingInterval / 2)
+        timer.setEventHandler { [weak self] in
+            self?.keepaliveTick()
+        }
+        timer.resume()
+        keepaliveTimer = timer
+    }
+
+    private func keepaliveTick() {
+        let now = Date()
+        if let waitingSince = awaitingPongSince {
+            if now.timeIntervalSince(waitingSince) > IRC.pingTimeout {
+                log("Ping timeout after \(Int(IRC.pingTimeout))s — connection is dead", level: .error)
+                awaitingPongSince = nil
+                connection?.cancel()   // drives the normal disconnect + reconnect path
+            }
+        } else if now.timeIntervalSince(lastActivity) >= IRC.pingInterval {
+            awaitingPongSince = now
+            send(command: "PING", parameters: ["LC\(Int(now.timeIntervalSince1970))"])
+        }
+    }
+
+    private func stopKeepalive() {
+        keepaliveTimer?.cancel()
+        keepaliveTimer = nil
+        awaitingPongSince = nil
+    }
+
     /// Deliver any messages still buffered in open batches (e.g. the server
     /// dropped mid-playback) so they aren't silently lost.
     private func flushPendingBatches() {

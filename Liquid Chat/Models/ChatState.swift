@@ -75,6 +75,9 @@ class ChatState: IRCConnectionDelegate {
             oldConnection.disconnect()
         }
 
+        // Fresh 005 negotiation per connection
+        server.isupport = IRCISupport()
+
         let connection = IRCConnection(config: server.config)
         connection.delegate = self
         server.connection = connection
@@ -530,6 +533,9 @@ class ChatState: IRCConnectionDelegate {
         case "QUIT":
             handleQuit(message, server: server)
 
+        case "005": // RPL_ISUPPORT
+            handleISupport(message, server: server)
+
         case "332": // RPL_TOPIC
             handleTopic(message, server: server)
 
@@ -628,7 +634,7 @@ class ChatState: IRCConnectionDelegate {
         }
 
         // Determine if this is a channel message or private message
-        let isChannelMessage = target.hasPrefix("#") || target.hasPrefix("&")
+        let isChannelMessage = server.isupport.isChannelName(target)
 
         // For private messages, the "channel" is the sender's nickname
         let channelName = isChannelMessage ? target : sender
@@ -788,11 +794,17 @@ class ChatState: IRCConnectionDelegate {
         }
     }
 
-    /// NAMES prefix symbols → the membership mode letters stored on IRCUser
-    /// (the same letters MODE events use, so the two sources stay consistent).
-    private static let prefixModeMap: [Character: Character] = [
-        "~": "q", "&": "a", "@": "o", "%": "h", "+": "v"
-    ]
+    /// 005 RPL_ISUPPORT — adopt the server's advertised prefixes, channel
+    /// mode categories, and channel-name characters.
+    private func handleISupport(_ message: IRCMessage, server: IRCServer) {
+        guard message.parameters.count >= 2 else { return }
+        // Parameters: [nick, token, token, …, "are supported by this server"]
+        var isupport = server.isupport
+        for token in message.parameters.dropFirst().dropLast() {
+            isupport.apply(token: token)
+        }
+        server.isupport = isupport
+    }
 
     private func handleNamesReply(_ message: IRCMessage, server: IRCServer) {
         guard message.parameters.count >= 4 else {
@@ -813,12 +825,13 @@ class ChatState: IRCConnectionDelegate {
                 channel.users.removeAll()
             }
 
+            let symbolToMode = server.isupport.symbolToMode
             for name in names {
                 var nickname = name
                 var modes: Set<Character> = []
 
                 // Parse mode prefixes (handle multi-prefix like @+nickname)
-                while let first = nickname.first, let modeLetter = Self.prefixModeMap[first] {
+                while let first = nickname.first, let modeLetter = symbolToMode[first] {
                     modes.insert(modeLetter)
                     nickname.removeFirst()
                 }
@@ -950,18 +963,16 @@ class ChatState: IRCConnectionDelegate {
         let modeString = message.parameters[1]
         
         // Only handle channel modes
-        guard target.hasPrefix("#") || target.hasPrefix("&"),
+        let isupport = server.isupport
+        guard isupport.isChannelName(target),
               let channel = server.channel(named: target) else { return }
 
-        // Parse mode changes (+o, -v, etc.)
+        // Parse mode changes (+o, -v, etc.). Argument consumption follows the
+        // server's advertised CHANMODES categories — a skipped argument would
+        // make later membership modes read the wrong nickname
+        // (e.g. "MODE #chan +bo mask nick" would op "mask").
         var adding = true
         var modeIndex = 2 // Parameter index for mode arguments
-
-        // Non-membership modes that also consume an argument — their parameter
-        // must be skipped or later membership modes read the wrong nickname
-        // (e.g. "MODE #chan +bo mask nick" would op "mask").
-        let alwaysTakesArg: Set<Character> = ["b", "e", "I", "k", "f", "j"]
-        let takesArgWhenAdding: Set<Character> = ["l"]
 
         for char in modeString {
             switch char {
@@ -969,24 +980,23 @@ class ChatState: IRCConnectionDelegate {
                 adding = true
             case "-":
                 adding = false
-            case "q", "a", "o", "h", "v": // Membership modes (owner/admin/op/half-op/voice)
-                if modeIndex < message.parameters.count {
-                    let nickname = message.parameters[modeIndex]
-                    modeIndex += 1
-                    if let userIndex = channel.userIndex(named: nickname) {
-                        var user = channel.users[userIndex]
-                        if adding {
-                            user.modes.insert(char)
-                        } else {
-                            user.modes.remove(char)
-                        }
-                        channel.users[userIndex] = user
-                    }
-                }
             default:
-                // Other modes don't affect the user list, but arg-consuming
-                // ones still advance the parameter index
-                if alwaysTakesArg.contains(char) || (adding && takesArgWhenAdding.contains(char)) {
+                if isupport.prefixModes.contains(char) {
+                    // Membership mode (owner/admin/op/half-op/voice…)
+                    if modeIndex < message.parameters.count {
+                        let nickname = message.parameters[modeIndex]
+                        modeIndex += 1
+                        if let userIndex = channel.userIndex(named: nickname) {
+                            var user = channel.users[userIndex]
+                            if adding {
+                                user.modes.insert(char)
+                            } else {
+                                user.modes.remove(char)
+                            }
+                            channel.users[userIndex] = user
+                        }
+                    }
+                } else if isupport.modeTakesArgument(char, whenAdding: adding) {
                     modeIndex += 1
                 }
             }
