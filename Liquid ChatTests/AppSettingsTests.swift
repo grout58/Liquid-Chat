@@ -10,7 +10,9 @@ import SwiftUI
 @testable import Liquid_Chat
 
 /// Tests for AppSettings persistence and management
-@Suite("Application Settings Tests")
+/// .serialized: every test instance clears the shared "TestAppSettings"
+/// UserDefaults domain in init(), so parallel execution races between tests.
+@Suite("Application Settings Tests", .serialized)
 struct AppSettingsTests {
     
     // Test UserDefaults suite to avoid polluting real data
@@ -86,10 +88,10 @@ struct AppSettingsTests {
         let settings = createTestSettings()
         
         settings.theme = .dark
-        #expect(testDefaults.string(forKey: "theme") == "dark")
+        #expect(testDefaults.string(forKey: "theme") == AppTheme.dark.rawValue)
         
         settings.theme = .nord
-        #expect(testDefaults.string(forKey: "theme") == "nord")
+        #expect(testDefaults.string(forKey: "theme") == AppTheme.nord.rawValue)
     }
     
     @Test("Font size multiplier persists")
@@ -275,7 +277,7 @@ struct AppSettingsTests {
     
     @Test("Load theme from UserDefaults on init")
     func testLoadThemeOnInit() {
-        testDefaults.set("dark", forKey: "theme")
+        testDefaults.set(AppTheme.dark.rawValue, forKey: "theme")
         
         let settings = createTestSettings()
         
@@ -375,7 +377,7 @@ struct AppSettingsTests {
         settings.resetToDefaults()
         
         // Verify persistence
-        #expect(testDefaults.string(forKey: "theme") == "system")
+        #expect(testDefaults.string(forKey: "theme") == AppTheme.system.rawValue)
         #expect(testDefaults.double(forKey: "fontSizeMultiplier") == 1.0)
         #expect(testDefaults.bool(forKey: "showTimestamps") == true)
     }

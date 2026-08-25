@@ -8,6 +8,7 @@
 import Testing
 import Foundation
 import Network
+import SwiftUI
 @testable import Liquid_Chat
 
 @Suite("IRC Connection Tests")
@@ -64,14 +65,13 @@ struct IRCConnectionTests {
         #expect(parsed?.parameters[0] == "irc.server.net")
     }
     
-    @Test("IRC Message Parsing - Empty Message")
+    @Test("IRC Message Parsing - Empty Message returns nil")
     func testEmptyMessageParsing() {
-        let rawMessage = ""
-        let parsed = IRCMessage.parse(rawMessage)
-        
-        #expect(parsed != nil)
-        #expect(parsed?.command == "")
-        #expect(parsed?.parameters.isEmpty == true)
+        // An empty line carries no command — parse must reject it
+        // (matches the parser suite's expectation and RFC 1459 §2.3.1)
+        let parsed = IRCMessage.parse("")
+
+        #expect(parsed == nil)
     }
     
     @Test("IRC Message Formatting")
@@ -181,9 +181,9 @@ struct ChatStateTests {
         let config = IRCServerConfig(hostname: "irc.test.net", nickname: "TestUser")
         
         chatState.addServer(config: config)
-        
+
         #expect(chatState.servers.count == 1)
-        #expect(chatState.servers[0].config.hostname == "irc.test.net")
+        #expect(chatState.servers.first?.config.hostname == "irc.test.net")
     }
     
     @MainActor
@@ -195,9 +195,9 @@ struct ChatStateTests {
         chatState.servers.append(server)
         
         chatState.joinChannel(name: "#swift", on: server)
-        
+
         #expect(server.channels.count == 1)
-        #expect(server.channels[0].name == "#swift")
+        #expect(server.channels.first?.name == "#swift")
     }
     
     @MainActor
@@ -209,10 +209,10 @@ struct ChatStateTests {
         chatState.servers.append(server)
         
         chatState.openPrivateMessage(with: "alice", on: server)
-        
+
         #expect(server.channels.count == 1)
-        #expect(server.channels[0].name == "alice")
-        #expect(server.channels[0].isPrivateMessage == true)
+        #expect(server.channels.first?.name == "alice")
+        #expect(server.channels.first?.isPrivateMessage == true)
         #expect(chatState.selectedChannel?.name == "alice")
     }
     
@@ -236,6 +236,7 @@ struct ChatStateTests {
 @Suite("IRC Command Handler Tests")
 struct IRCCommandHandlerTests {
     
+    @MainActor
     @Test("Command Detection")
     func testCommandDetection() {
         let config = IRCServerConfig(hostname: "test", nickname: "user")

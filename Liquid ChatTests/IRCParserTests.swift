@@ -150,12 +150,11 @@ struct IRCParserTests {
         
         let serverTime = message?.serverTime
         #expect(serverTime != nil)
-        
-        // Verify it's a valid date (within reasonable range)
-        let now = Date()
-        let yearAgo = now.addingTimeInterval(-365 * 24 * 3600)
-        #expect(serverTime! > yearAgo)
-        #expect(serverTime! < now.addingTimeInterval(3600))
+
+        // 2024-01-15T10:30:45.123Z == 1705314645.123 seconds since epoch
+        if let serverTime {
+            #expect(abs(serverTime.timeIntervalSince1970 - 1_705_314_645.123) < 0.001)
+        }
     }
     
     @Test("Parse batch tag")
@@ -376,8 +375,9 @@ struct IRCParserTests {
     
     @Test("Format command with multiple middle parameters")
     func formatCommandWithMultipleParameters() throws {
+        // The trailing parameter is always colon-prefixed (legal for every command)
         let formatted = IRCMessage.format(command: "MODE", parameters: ["#channel", "+o", "alice"])
-        #expect(formatted == "MODE #channel +o alice")
+        #expect(formatted == "MODE #channel +o :alice")
     }
     
     @Test("Format command with trailing parameter containing space")
@@ -447,18 +447,77 @@ struct IRCParserTests {
         #expect(message?.parameters == ["#ChAnNeL", "HeLLo"])
     }
     
+    // MARK: - Bare Commands (regression: last character was being truncated)
+
+    @Test("Bare command without parameters keeps its full name")
+    func parseBareCommandKeepsFullName() throws {
+        #expect(IRCMessage.parse("PING")?.command == "PING")
+        #expect(IRCMessage.parse("AWAY")?.command == "AWAY")
+        #expect(IRCMessage.parse(":nick!u@h AWAY")?.command == "AWAY")
+    }
+
+    // MARK: - IRCv3 Tag Value Unescaping
+
+    @Test("Tag values are unescaped per the message-tags spec")
+    func parseTagValueUnescaping() throws {
+        let message = IRCMessage.parse(#"@key=a\:b\ss\\c\r\n;plain=x PRIVMSG #channel :Hi"#)
+
+        #expect(message != nil)
+        #expect(message?.tags["key"] == "a;b s\\c\r\n")
+        #expect(message?.tags["plain"] == "x")
+    }
+
     // MARK: - Description Tests
-    
+
     @Test("Message description format")
     func messageDescriptionFormat() throws {
         let message = IRCMessage.parse(":nick!user@host PRIVMSG #channel :Hello")
-        
+
         #expect(message != nil)
-        
+
         let description = message!.description
         #expect(description.contains("nick!user@host"))
         #expect(description.contains("PRIVMSG"))
         #expect(description.contains("#channel"))
         #expect(description.contains("Hello"))
+    }
+}
+
+// MARK: - IRC String Semantics Tests
+
+@Suite("IRC String Semantics Tests")
+struct IRCStringSemanticsTests {
+
+    @Test("RFC 1459 casemapping folds case and bracket equivalents")
+    func casemapping() throws {
+        #expect("#Swift".ircCasemapped == "#swift".ircCasemapped)
+        #expect("Nick[a]".ircCasemapped == "nick{a}".ircCasemapped)
+        #expect("a\\b^c".ircCasemapped == "A|B~C".ircCasemapped)
+        #expect("alice".ircCasemapped != "bob".ircCasemapped)
+    }
+
+    @Test("Mention detection requires word boundaries")
+    func mentionWordBoundaries() throws {
+        #expect("hey ed, look at this".containsNick("ed"))
+        #expect("Ed: ping".containsNick("ed"))
+        #expect(!"this was edited yesterday".containsNick("ed"))
+        #expect(!"credit where due".containsNick("ed"))
+        #expect("ed".containsNick("ed"))
+    }
+
+    @Test("mIRC formatting codes are stripped")
+    func stripFormattingCodes() throws {
+        #expect(IRCTextFormatter.stripFormattingCodes("\u{02}bold\u{02} text") == "bold text")
+        #expect(IRCTextFormatter.stripFormattingCodes("\u{03}04red\u{03} plain") == "red plain")
+        #expect(IRCTextFormatter.stripFormattingCodes("\u{03}04,05fg-bg\u{0F}done") == "fg-bgdone")
+        #expect(IRCTextFormatter.stripFormattingCodes("no codes here") == "no codes here")
+        // A comma not followed by digits is literal text, not a background color
+        #expect(IRCTextFormatter.stripFormattingCodes("\u{03}04,and more") == ",and more")
+    }
+
+    @Test("CTCP ACTION content renders without control characters")
+    func actionMessageContent() throws {
+        let message = IRCChatMessage(sender: "alice", content: "waves hello", type: .action)
+        #expect(String(message.content.characters) == "waves hello")
     }
 }

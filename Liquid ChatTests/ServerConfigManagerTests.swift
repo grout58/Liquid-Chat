@@ -10,7 +10,9 @@ import Foundation
 @testable import Liquid_Chat
 
 /// Tests for ServerConfigManager persistence and CRUD operations
-@Suite("Server Configuration Manager Tests")
+/// .serialized: every test instance clears the shared "TestDefaults" domain
+/// in init(), so parallel execution races between tests.
+@Suite("Server Configuration Manager Tests", .serialized)
 struct ServerConfigManagerTests {
     
     // Test UserDefaults suite to avoid polluting real data
@@ -333,10 +335,10 @@ struct ServerConfigManagerTests {
         // Create new manager instance - should load from UserDefaults
         do {
             let newManager = createTestManager()
-            
+
             #expect(newManager.savedServers.count == 2)
-            #expect(newManager.savedServers[0].hostname == "irc.server1.net")
-            #expect(newManager.savedServers[1].hostname == "irc.server2.net")
+            #expect(newManager.savedServers.first?.hostname == "irc.server1.net")
+            #expect(newManager.savedServers.last?.hostname == "irc.server2.net")
         }
     }
     
@@ -408,20 +410,21 @@ struct ServerConfigManagerTests {
     @Test("Concurrent operations safety")
     func testConcurrentOperations() async {
         let manager = createTestManager()
-        
-        // Perform concurrent saves
+
+        let configs = (1...10).map { i in
+            createSampleConfig(hostname: "irc.server\(i).net", nickname: "User\(i)")
+        }
+
+        // saveServer is not thread-safe by design — the app only calls it from
+        // the main actor. Concurrent tasks must funnel through it the same way.
         await withTaskGroup(of: Void.self) { group in
-            for i in 1...10 {
+            for config in configs {
                 group.addTask {
-                    let config = createSampleConfig(
-                        hostname: "irc.server\(i).net",
-                        nickname: "User\(i)"
-                    )
-                    manager.saveServer(config)
+                    await MainActor.run { manager.saveServer(config) }
                 }
             }
         }
-        
+
         // All servers should be saved
         #expect(manager.savedServers.count == 10)
     }
