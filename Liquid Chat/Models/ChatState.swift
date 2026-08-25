@@ -38,6 +38,9 @@ class ChatState: IRCConnectionDelegate {
     /// Pending connection error alert (server + message)
     var connectionAlert: ConnectionAlert?
 
+    /// DCC file transfers (offers require explicit user acceptance)
+    let dccManager = DCCManager()
+
     /// Network path monitor for reconnect-on-network-change
     @ObservationIgnored private var pathMonitor: NWPathMonitor?
     @ObservationIgnored private var lastPathWasSatisfied = true
@@ -632,6 +635,9 @@ class ChatState: IRCConnectionDelegate {
             } else if inner == "PING" || inner.hasPrefix("PING ") {
                 server.connection?.send(command: "NOTICE", parameters: [sender, "\u{01}\(inner)\u{01}"])
                 return
+            } else if inner.hasPrefix("DCC ") {
+                handleDCC(String(inner.dropFirst(4)), from: sender, server: server)
+                return
             } else {
                 // Other CTCP queries: ignore quietly
                 return
@@ -871,6 +877,58 @@ class ChatState: IRCConnectionDelegate {
         server.channel(named: message.parameters[1])?.isReceivingNames = false
     }
     
+    // MARK: - DCC File Transfers
+
+    /// Handle a CTCP `DCC …` request. Only SEND offers are supported, and
+    /// nothing is downloaded until the user explicitly accepts.
+    private func handleDCC(_ arguments: String, from sender: String, server: IRCServer) {
+        guard arguments.uppercased().hasPrefix("SEND ") else {
+            Task { await ConsoleLogger.shared.log("Ignoring unsupported DCC request from \(sender): \(arguments.prefix(60))", level: .info, category: "DCC") }
+            return
+        }
+
+        guard let offer = DCCOffer.parse(sendArguments: String(arguments.dropFirst(5))) else {
+            Task { await ConsoleLogger.shared.log("Malformed DCC SEND from \(sender)", level: .warning, category: "DCC") }
+            return
+        }
+
+        // Surface the offer in the sender's query channel either way
+        let channel: IRCChannel
+        if let existing = server.channel(named: sender) {
+            channel = existing
+        } else {
+            channel = IRCChannel(name: sender, server: server)
+            server.channels.append(channel)
+        }
+
+        guard !offer.isPassive else {
+            channel.appendMessage(IRCChatMessage(
+                sender: "System",
+                content: "\(sender) offered the file \"\(offer.filename)\" via reverse DCC, which isn't supported.",
+                type: .system
+            ), isActive: channel === selectedChannel)
+            return
+        }
+
+        let transfer = DCCTransfer(sender: sender, serverName: server.config.hostname, offer: offer)
+        dccManager.addOffer(transfer)
+
+        channel.appendMessage(IRCChatMessage(
+            sender: "System",
+            content: "\(sender) offers the file \"\(offer.filename)\" (\(transfer.formattedSize)). Review it in Transfers before accepting.",
+            type: .system
+        ), isActive: channel === selectedChannel)
+
+        sendNotification(
+            title: "File offer from \(sender)",
+            body: "\(offer.filename) (\(transfer.formattedSize))",
+            identifier: "dcc-\(transfer.id)",
+            server: server,
+            channelName: sender
+        )
+        updateDockBadge()
+    }
+
     // MARK: - Soju Bouncer Networks
 
     /// `BOUNCER NETWORK <netid> <attributes>` — maintain the network list a

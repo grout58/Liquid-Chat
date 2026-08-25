@@ -641,3 +641,69 @@ struct BouncerNetworkTests {
         #expect(BouncerNetwork(id: "1", attributes: [:]).state == nil)
     }
 }
+
+// MARK: - DCC Offer Tests
+
+@Suite("DCC Offer Parsing Tests")
+struct DCCOfferTests {
+
+    @Test("Classic offer with packed IPv4 address")
+    func classicOffer() throws {
+        let offer = DCCOffer.parse(sendArguments: "photo.png 3232235777 5000 12345")
+
+        #expect(offer?.filename == "photo.png")
+        #expect(offer?.host == "192.168.1.1")
+        #expect(offer?.port == 5000)
+        #expect(offer?.fileSize == 12345)
+        #expect(offer?.isPassive == false)
+    }
+
+    @Test("Quoted filename with spaces")
+    func quotedFilename() throws {
+        let offer = DCCOffer.parse(sendArguments: "\"my holiday photo.png\" 3232235777 5000 12345")
+
+        #expect(offer?.filename == "my holiday photo.png")
+        #expect(offer?.port == 5000)
+    }
+
+    @Test("Literal address hosts pass through")
+    func literalHost() throws {
+        let v4 = DCCOffer.parse(sendArguments: "f.txt 10.0.0.5 6000 10")
+        // A packed value larger than UInt32 range can't parse as an integer
+        let v6 = DCCOffer.parse(sendArguments: "f.txt 2001:db8::1 6000 10")
+
+        #expect(v4?.host == "10.0.0.5")
+        #expect(v6?.host == "2001:db8::1")
+    }
+
+    @Test("Missing size defaults to unknown; port 0 marks passive DCC")
+    func edgeFields() throws {
+        let noSize = DCCOffer.parse(sendArguments: "f.txt 3232235777 5000")
+        let passive = DCCOffer.parse(sendArguments: "f.txt 3232235777 0 10")
+
+        #expect(noSize?.fileSize == 0)
+        #expect(passive?.isPassive == true)
+    }
+
+    @Test("Malformed offers are rejected")
+    func malformedOffers() throws {
+        #expect(DCCOffer.parse(sendArguments: "") == nil)
+        #expect(DCCOffer.parse(sendArguments: "file.txt") == nil)              // no host/port
+        #expect(DCCOffer.parse(sendArguments: "file.txt 12345") == nil)        // no port
+        #expect(DCCOffer.parse(sendArguments: "\"unterminated 1 2 3") == nil)  // bad quoting
+        #expect(DCCOffer.parse(sendArguments: "f.txt 12345 notaport 3") == nil)
+    }
+
+    @Test("Filenames are sanitized against traversal and dotfiles")
+    func filenameSanitization() throws {
+        #expect(DCCOffer.sanitizeFilename("../../etc/passwd") == "passwd")
+        #expect(DCCOffer.sanitizeFilename("..\\..\\evil.exe") == "evil.exe")
+        #expect(DCCOffer.sanitizeFilename(".hidden") == "hidden")
+        #expect(DCCOffer.sanitizeFilename("///") == "download")
+        #expect(DCCOffer.sanitizeFilename("normal.png") == "normal.png")
+
+        // End-to-end: a hostile offer can't smuggle a path
+        let offer = DCCOffer.parse(sendArguments: "\"../../.ssh/authorized_keys\" 3232235777 5000 10")
+        #expect(offer?.filename == "authorized_keys")
+    }
+}

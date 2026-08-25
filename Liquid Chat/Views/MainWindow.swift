@@ -12,6 +12,7 @@ struct MainWindow: View {
     @State private var selectedChannel: IRCChannel?
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
     @State private var showConsole = false
+    @State private var showTransfers = false
     @State private var hasLoadedSavedServers = false
     
     // Use shared settings directly without @State copy
@@ -57,6 +58,19 @@ struct MainWindow: View {
             }
         }
         .toolbar {
+            ToolbarItem(placement: .automatic) {
+                Button {
+                    showTransfers.toggle()
+                } label: {
+                    Label("Transfers", systemImage: chatState.dccManager.attentionCount > 0
+                          ? "arrow.down.circle.fill" : "arrow.down.circle")
+                }
+                .help("File transfers (DCC)")
+                .popover(isPresented: $showTransfers, arrowEdge: .bottom) {
+                    DCCTransfersView(manager: chatState.dccManager)
+                }
+            }
+
             ToolbarItem(placement: .automatic) {
                 Button {
                     withAnimation {
