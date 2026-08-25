@@ -66,6 +66,9 @@ struct IRCServerConfig: Codable, Identifiable, Equatable, Hashable {
     /// Keychain identity label for SASL EXTERNAL client-certificate auth.
     /// Optional so configs saved by older versions still decode.
     var clientCertificateName: String?
+    /// Soju bouncer network id — when set, this connection sends
+    /// `BOUNCER BIND <id>` during registration to attach to that network.
+    var bouncerNetworkID: String?
 
     init(
         id: UUID = UUID(),
@@ -79,7 +82,8 @@ struct IRCServerConfig: Codable, Identifiable, Equatable, Hashable {
         authMethod: IRCAuthMethod = .none,
         autoConnect: Bool = false,
         savedName: String? = nil,
-        clientCertificateName: String? = nil
+        clientCertificateName: String? = nil,
+        bouncerNetworkID: String? = nil
     ) {
         self.id = id
         self.hostname = hostname
@@ -93,6 +97,7 @@ struct IRCServerConfig: Codable, Identifiable, Equatable, Hashable {
         self.autoConnect = autoConnect
         self.savedName = savedName
         self.clientCertificateName = clientCertificateName
+        self.bouncerNetworkID = bouncerNetworkID
     }
 
     var displayName: String {
@@ -113,7 +118,8 @@ struct IRCServerConfig: Codable, Identifiable, Equatable, Hashable {
             authMethod: authMethod,
             autoConnect: autoConnect,
             savedName: savedName,
-            clientCertificateName: clientCertificateName
+            clientCertificateName: clientCertificateName,
+            bouncerNetworkID: bouncerNetworkID
         )
     }
 }
@@ -150,6 +156,9 @@ class IRCConnection {
 
     // Connection metadata
     private(set) var serverName: String?
+    /// True once the server acknowledged soju.im/bouncer-networks — the
+    /// signal to list networks after registration. Main-thread.
+    private(set) var supportsBouncerNetworks = false
     /// The nickname the server knows us by. Mutated only on the main thread
     /// (confirmed by 001 / NICK echoes) so SwiftUI observation stays race-free.
     private(set) var currentNickname: String
@@ -599,7 +608,8 @@ class IRCConnection {
                 }
 
                 // Request IRCv3 + bouncer capabilities
-                for cap in ["multi-prefix", "server-time", "message-tags", "batch", "znc.in/playback"]
+                for cap in ["multi-prefix", "server-time", "message-tags", "batch",
+                            "znc.in/playback", "soju.im/bouncer-networks", "soju.im/bouncer-networks-notify"]
                     where advertisedCapabilities.contains(cap) {
                     requestedCaps.append(cap)
                 }
@@ -625,7 +635,19 @@ class IRCConnection {
                 capabilitiesAcknowledged.formUnion(caps)
                 
                 log("✓ Capabilities acknowledged: \(caps.joined(separator: ", "))", level: .info)
-                
+
+                if caps.contains("soju.im/bouncer-networks") {
+                    DispatchQueue.main.async { [weak self] in
+                        self?.supportsBouncerNetworks = true
+                    }
+                    // Bind to our network now, while registration is still in
+                    // progress (the spec requires BIND before it completes).
+                    if let networkID = config.bouncerNetworkID {
+                        log("Binding to bouncer network \(networkID)", level: .info)
+                        send(command: "BOUNCER", parameters: ["BIND", networkID])
+                    }
+                }
+
                 // If SASL was acknowledged, begin SASL auth
                 if caps.contains("sasl") {
                     if config.authMethod == .saslExternal {

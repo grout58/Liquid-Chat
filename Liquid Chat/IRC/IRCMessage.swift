@@ -150,8 +150,9 @@ struct IRCMessage {
         return command.count == 3 && command.allSatisfy { $0.isASCII && $0.isNumber }
     }
 
-    /// Unescape an IRCv3 message-tag value (\: → ; \s → space, \\, \r, \n)
-    private static func unescapeTagValue(_ value: Substring) -> String {
+    /// Unescape an IRCv3 message-tag value (\: → ; \s → space, \\, \r, \n).
+    /// Internal because bouncer-network attributes share this escaping.
+    static func unescapeTagValue(_ value: Substring) -> String {
         guard value.contains("\\") else { return String(value) }
         var result = ""
         result.reserveCapacity(value.count)

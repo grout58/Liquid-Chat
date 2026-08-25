@@ -161,6 +161,10 @@ class IRCServer: Identifiable {
     /// What this server advertised in RPL_ISUPPORT (005); defaults until then.
     var isupport = IRCISupport()
 
+    /// Networks a Soju-style bouncer advertised on this connection
+    /// (empty for regular servers and bound per-network connections).
+    var bouncerNetworks: [BouncerNetwork] = []
+
     /// Task for observing connection state changes (can be cancelled)
     var observationTask: Task<Void, Never>?
 

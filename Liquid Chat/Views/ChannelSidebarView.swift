@@ -41,6 +41,10 @@ struct ChannelSidebarView: View {
                                     ChannelRowView(channel: channel, chatState: chatState)
                                         .tag(channel)
                                 }
+                                // Networks a Soju bouncer advertised on this connection
+                                ForEach(server.bouncerNetworks) { network in
+                                    BouncerNetworkRowView(network: network, bouncer: server, chatState: chatState)
+                                }
                             } header: {
                                 ServerHeaderView(server: server, chatState: chatState, editingServer: $editingServer)
                             }
@@ -99,6 +103,56 @@ struct ChannelSidebarView: View {
             }
         }
         .themedBackground(settings)
+    }
+}
+
+/// One network behind a Soju bouncer: state dot, name, and an Open button
+/// that spawns (or focuses) the bound per-network connection.
+struct BouncerNetworkRowView: View {
+    let network: BouncerNetwork
+    let bouncer: IRCServer
+    let chatState: ChatState
+
+    private var stateColor: Color {
+        switch network.state {
+        case .connected: return .green
+        case .connecting: return .orange
+        case .disconnected, nil: return .secondary
+        }
+    }
+
+    private var isOpen: Bool {
+        chatState.servers.contains {
+            $0.config.bouncerNetworkID == network.id
+                && $0.config.hostname == bouncer.config.hostname
+                && $0.isConnected
+        }
+    }
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "circle.fill")
+                .font(.system(size: 7))
+                .foregroundStyle(stateColor)
+
+            Image(systemName: "network")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            Text(network.name)
+                .font(.body)
+
+            Spacer()
+
+            Button(isOpen ? "Show" : "Open") {
+                chatState.connectToBouncerNetwork(network, via: bouncer)
+            }
+            .font(.caption)
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+        }
+        .padding(.vertical, 2)
+        .help(network.host.map { "Upstream: \($0)" } ?? "Bouncer network \(network.id)")
     }
 }
 

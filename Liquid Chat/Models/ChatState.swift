@@ -75,8 +75,9 @@ class ChatState: IRCConnectionDelegate {
             oldConnection.disconnect()
         }
 
-        // Fresh 005 negotiation per connection
+        // Fresh 005 negotiation and network discovery per connection
         server.isupport = IRCISupport()
+        server.bouncerNetworks = []
 
         let connection = IRCConnection(config: server.config)
         connection.delegate = self
@@ -419,10 +420,21 @@ class ChatState: IRCConnectionDelegate {
                 server.isConnected = true
                 server.reconnectDelay = 5.0  // Reset backoff on successful registration
 
+                // A bouncer controller connection lists its networks instead
+                // of behaving like a normal chat connection.
+                let isBouncerController = connection.supportsBouncerNetworks
+                    && server.config.bouncerNetworkID == nil
+                if isBouncerController {
+                    connection.send(command: "BOUNCER", parameters: ["LISTNETWORKS"])
+                }
+
                 // Rejoin any previously joined channels
                 let previousChannels = server.channels.filter { $0.isJoined && !$0.isPrivateMessage }
                 if previousChannels.isEmpty {
                     // No previously joined channels — show the join dialog
+                    // (not for bouncer controllers, whose sidebar entry will
+                    // fill with discovered networks instead)
+                    guard !isBouncerController else { return }
                     Task {
                         try? await Task.sleep(for: .milliseconds(500))
                         showingChannelJoinForServer = server
@@ -538,6 +550,9 @@ class ChatState: IRCConnectionDelegate {
 
         case "005": // RPL_ISUPPORT
             handleISupport(message, server: server)
+
+        case "BOUNCER":
+            handleBouncer(message, server: server)
 
         case "332": // RPL_TOPIC
             handleTopic(message, server: server)
@@ -856,6 +871,68 @@ class ChatState: IRCConnectionDelegate {
         server.channel(named: message.parameters[1])?.isReceivingNames = false
     }
     
+    // MARK: - Soju Bouncer Networks
+
+    /// `BOUNCER NETWORK <netid> <attributes>` — maintain the network list a
+    /// Soju-style bouncer advertises. Attributes of "*" mean the network was
+    /// deleted; otherwise they merge into what we already know.
+    private func handleBouncer(_ message: IRCMessage, server: IRCServer) {
+        guard message.parameters.count >= 3,
+              message.parameters[0].uppercased() == "NETWORK" else { return }
+
+        let networkID = message.parameters[1]
+        let attributeString = message.parameters[2]
+
+        if attributeString == "*" {
+            server.bouncerNetworks.removeAll { $0.id == networkID }
+            return
+        }
+
+        let attributes = BouncerNetwork.parseAttributes(attributeString)
+        if let index = server.bouncerNetworks.firstIndex(where: { $0.id == networkID }) {
+            var network = server.bouncerNetworks[index]
+            network.attributes.merge(attributes) { _, new in new }
+            server.bouncerNetworks[index] = network
+        } else {
+            server.bouncerNetworks.append(BouncerNetwork(id: networkID, attributes: attributes))
+        }
+    }
+
+    /// Open (or focus) a per-network connection bound to one of the bouncer's
+    /// networks via `BOUNCER BIND`.
+    func connectToBouncerNetwork(_ network: BouncerNetwork, via bouncer: IRCServer) {
+        // Reuse an existing bound server for this network
+        if let existing = servers.first(where: {
+            $0.config.bouncerNetworkID == network.id && $0.config.hostname == bouncer.config.hostname
+        }) {
+            if !existing.isConnected {
+                connectToServer(existing)
+            }
+            selectedChannel = existing.channels.first ?? selectedChannel
+            return
+        }
+
+        // Same bouncer credentials, bound to the chosen network
+        let base = bouncer.config
+        let config = IRCServerConfig(
+            hostname: base.hostname,
+            port: base.port,
+            useSSL: base.useSSL,
+            nickname: base.nickname,
+            username: base.username,
+            realname: base.realname,
+            password: base.password,
+            authMethod: base.authMethod,
+            savedName: network.name,
+            clientCertificateName: base.clientCertificateName,
+            bouncerNetworkID: network.id
+        )
+        addServer(config: config)
+        if let server = servers.last {
+            connectToServer(server)
+        }
+    }
+
     // MARK: - ZNC Bouncer Handling
 
     /// Route messages from ZNC pseudo-users (*status, *playback, etc.) to a server console channel.

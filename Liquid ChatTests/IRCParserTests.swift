@@ -606,3 +606,38 @@ struct IRCISupportTests {
         #expect(isupport.fold("nick[a]") != isupport.fold("nick{a}"))
     }
 }
+
+// MARK: - Bouncer Network Tests
+
+@Suite("Bouncer Network Tests")
+struct BouncerNetworkTests {
+
+    @Test("Attributes parse with tag-style unescaping")
+    func parseAttributes() throws {
+        let attrs = BouncerNetwork.parseAttributes(#"name=My\sNetwork;state=connected;host=irc.libera.chat;empty"#)
+
+        #expect(attrs["name"] == "My Network")
+        #expect(attrs["state"] == "connected")
+        #expect(attrs["host"] == "irc.libera.chat")
+        #expect(attrs["empty"] == "")
+    }
+
+    @Test("Network name falls back host, then id")
+    func nameFallback() throws {
+        let named = BouncerNetwork(id: "1", attributes: ["name": "Libera"])
+        let hosted = BouncerNetwork(id: "2", attributes: ["host": "irc.libera.chat"])
+        let bare = BouncerNetwork(id: "3", attributes: [:])
+
+        #expect(named.name == "Libera")
+        #expect(hosted.name == "irc.libera.chat")
+        #expect(bare.name == "3")
+    }
+
+    @Test("State maps known values and rejects unknown ones")
+    func stateParsing() throws {
+        #expect(BouncerNetwork(id: "1", attributes: ["state": "connected"]).state == .connected)
+        #expect(BouncerNetwork(id: "1", attributes: ["state": "connecting"]).state == .connecting)
+        #expect(BouncerNetwork(id: "1", attributes: ["state": "weird"]).state == nil)
+        #expect(BouncerNetwork(id: "1", attributes: [:]).state == nil)
+    }
+}
