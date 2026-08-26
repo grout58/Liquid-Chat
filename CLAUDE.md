@@ -131,6 +131,37 @@ server persistence. Conventions learned the hard way:
 - [ ] Notification reply while app is quit… backgrounded
 - [ ] 1000+ message channels for scroll performance
 
+## Handoff: where the last session stopped
+
+Everything through DCC receive is implemented, committed, and covered by
+174 passing tests (including real-socket `LoopbackIRCTests`). **No code
+work is pending.** The immediate next step is the first item above — the
+app has never exchanged bytes with a real ircd, so the live smoke test is
+what validates the stack end to end.
+
+Build and launch:
+
+```bash
+DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer xcodebuild build -project "Liquid Chat.xcodeproj" -scheme "Liquid Chat" -destination 'platform=macOS' CODE_SIGN_IDENTITY="-" CODE_SIGNING_REQUIRED=NO DEVELOPMENT_TEAM=
+open ~/Library/Developer/Xcode/DerivedData/Liquid_Chat-*/Build/Products/Debug/"Liquid Chat.app"
+```
+
+Smoke-test script: ⌘N → `irc.libera.chat`, port 6697, SSL on, auth None →
+Connect. Then confirm, in order:
+
+1. Sidebar header goes green and shows **Libera.Chat** (005 NETWORK parsed)
+2. A **"NN ms"** lag readout appears after ~60s idle (keepalive round-trip)
+3. `/join #libera-sandbox` populates the user list with `@`/`+` prefixes
+   (NAMES prefix→mode mapping)
+4. Tab cycles through matching nicks; a 2–4 line paste arrives as separate
+   messages rather than one mangled line
+5. The Console panel (toolbar) shows the raw `→`/`←` protocol trace — the
+   place to look first if anything misbehaves
+
+After that, the open feature work is: DCC **send** (needs a listening-socket
+/ NAT design decision first), Soju ADDNETWORK/CHANGENETWORK/DELNETWORK UI,
+and the TextKit 2 message view.
+
 ## Architecture Notes
 
 ### Threading model (do not regress)
