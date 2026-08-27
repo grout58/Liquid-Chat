@@ -113,9 +113,10 @@ Run the suite (needs Xcode; use DEVELOPER_DIR if xcode-select points at CLT):
 DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer xcodebuild test -project "Liquid Chat.xcodeproj" -scheme "Liquid Chat" -destination 'platform=macOS' -only-testing:"Liquid ChatTests" CODE_SIGN_IDENTITY="-" CODE_SIGNING_REQUIRED=NO DEVELOPMENT_TEAM=
 ```
 
-163 tests across parser, ISUPPORT, casemapping/mention semantics, bouncer
-attributes, connection integration (MockIRCConnection), settings, and
-server persistence. Conventions learned the hard way:
+174 tests across parser, ISUPPORT, casemapping/mention semantics, bouncer
+attributes, DCC offer parsing/sanitization, connection integration
+(MockIRCConnection), real-socket integration (`LoopbackIRCTests`),
+settings, and server persistence. Conventions learned the hard way:
 
 - `AppSettingsTests` and `ServerConfigManagerTests` are `.serialized` —
   they share a UserDefaults domain that each test's `init()` clears
@@ -161,6 +162,24 @@ Connect. Then confirm, in order:
 After that, the open feature work is: DCC **send** (needs a listening-socket
 / NAT design decision first), Soju ADDNETWORK/CHANGENETWORK/DELNETWORK UI,
 and the TextKit 2 message view.
+
+## Build & Versioning
+
+- `MARKETING_VERSION` (CFBundleShortVersionString) is the human-facing
+  version and is bumped by hand in the project settings.
+- `CFBundleVersion` is stamped at build time by
+  `Scripts/stamp-build-number.sh`, wired up as the "Stamp Build Number"
+  run-script phase on the app target. It uses `git rev-list --count HEAD`,
+  so the build number increments with every commit, is identical for the
+  same checkout on any machine, and needs no project-file churn.
+- The script also writes `LCSourceVersion` (`git describe --always --dirty`)
+  so a build made from uncommitted work is identifiable after the fact.
+- `CURRENT_PROJECT_VERSION` in the project file is only the fallback used
+  when git is unavailable; the script overwrites it in the built product.
+- The phase runs after `ProcessInfoPlistFile` and before `CodeSign`, so the
+  signature stays valid. It needs `ENABLE_USER_SCRIPT_SANDBOXING = NO` on
+  the app target (the script reads `.git`); the test targets keep the
+  sandbox on.
 
 ## Architecture Notes
 
