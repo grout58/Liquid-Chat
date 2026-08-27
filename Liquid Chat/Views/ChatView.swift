@@ -58,7 +58,7 @@ struct ChatView: View {
     /// Main message area with header, messages, smart replies, and input
     private var messageAreaView: some View {
         VStack(spacing: 0) {
-            // Channel header with Liquid Glass
+            // Channel header — floats above the message content
             ChannelHeaderView(channel: channel)
                 .padding(12)
                 .glassEffect(.regular.tint(.blue.opacity(0.15)), 
@@ -67,15 +67,14 @@ struct ChatView: View {
                 .padding(.horizontal, 12)
                 .padding(.top, showSearch ? 0 : 12)
             
-            // Message list with Liquid Glass
+            // Message list — content layer, no glass (HIG: glass is for
+            // the navigation layer that floats above content)
             MessageListView(
                 channel: channel,
                 scrollToMessageIndex: $scrollToMessageIndex,
                 highlightedMessageIndex: $highlightedMessageIndex,
                 searchText: currentSearchText
             )
-            .glassEffect(.regular, in: .rect(cornerRadius: 12))
-            .glassEffectID("messages", in: glassNamespace)
             .padding(12)
             
             // Smart Reply Suggestions (NEW macOS 26 AI Feature)
@@ -140,10 +139,9 @@ struct ChatView: View {
                     
                     // User list sidebar with morphing transition
                     if showUserList {
+                        Divider()
                         UserListView(channel: channel, chatState: chatState)
                             .frame(width: UI.userListWidth)
-                            .glassEffect(.regular, in: .rect(cornerRadius: 12))
-                            .glassEffectID("userlist", in: glassNamespace)
                             .padding(.trailing, 12)
                             .padding(.vertical, 12)
                     }
@@ -171,6 +169,7 @@ struct ChatView: View {
             Text(error)
         }
         .toolbar {
+            // Core view controls stay visible longest as the window narrows
             ToolbarItemGroup(placement: .primaryAction) {
                 // Search button with glass icon style
                 Button {
@@ -194,11 +193,11 @@ struct ChatView: View {
                 }
                 .buttonStyle(.glassIcon(isActive: showUserList))
                 .help(showUserList ? "Hide user list" : "Show user list")
-                
-                Divider()
-                    .frame(height: 24)
-                    .padding(.horizontal, 4)
-                
+            }
+            .visibilityPriority(.high)
+
+            // Secondary AI actions — first to collapse in a narrow window
+            ToolbarItemGroup(placement: .primaryAction) {
                 // AI Summarize button with enhanced glass style
                 Button {
                     generateSummary()
@@ -252,6 +251,7 @@ struct ChatView: View {
                       : "AI features require macOS 26+ with Apple Intelligence")
                 .keyboardShortcut("r", modifiers: [.command, .shift])
             }
+            .visibilityPriority(.low)
         }
         .sheet(isPresented: $showingSummary) {
             if let summary = currentSummary {
@@ -562,8 +562,6 @@ struct ChannelHeaderView: View {
             }
         }
         .padding(12)
-        .background(.ultraThinMaterial) // Material background for blur effect
-        .clipShape(RoundedRectangle(cornerRadius: 12))
     }
 }
 

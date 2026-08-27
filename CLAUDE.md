@@ -203,10 +203,34 @@ and the TextKit 2 message view.
 - PRIVMSG to ZNC modules is rejected before 001
 - A 400-byte-exact SASL payload needs a trailing `AUTHENTICATE +`
 
-### Liquid Glass best practices
-- Use `.glassEffect()` sparingly - only on functional elements
-- Test with Accessibility > Reduce Transparency enabled
-- Morphing containers need `.glassEffectID()` on all children
+### Liquid Glass / macOS 26–27 design rules
+- **Layering is the rule that matters**: Liquid Glass belongs to the
+  navigation layer that floats *above* content — toolbars, the search
+  overlay, the message input. It does **not** go on content containers.
+  The message list and user list deliberately have no `.glassEffect()`;
+  re-adding it there is a regression, not a polish.
+- Never stack glass on glass, or glass on a `.ultraThinMaterial`
+  background — one treatment per surface.
+- Don't mix `.regular` and `.clear` variants in the same interface.
+- Morphing containers need `.glassEffectID()` on all children.
+- Test with Accessibility > Reduce Transparency enabled; if the layout
+  falls apart, the glass was decoration rather than structure.
+- Toolbar groups carry `.visibilityPriority` (macOS 26.1+): core view
+  controls are `.high`, the AI actions are `.low` so they collapse first
+  in a narrow window.
+
+### App icon
+- `Liquid Chat/AppIcon.icon` is an Icon Composer document (the format
+  introduced with macOS 26): `icon.json` plus layer art in `Assets/`. The
+  system draws the squircle, shadow, specular highlights, and the
+  light/dark/tinted renditions — the source art is just the glyph on a
+  fill, and must not draw its own squircle or shadow.
+- It is picked up automatically by the synchronized file group and wins
+  over the asset catalog because both are named `AppIcon`.
+- `Assets.xcassets/AppIcon.appiconset` is kept only as the fallback for
+  Xcode 26, which ignores `.icon` files. Xcode 27+ uses the `.icon`.
+- Preview any rendition without opening Icon Composer:
+  `"/Applications/Xcode-beta.app/Contents/Applications/Icon Composer.app/Contents/Executables/ictool" "Liquid Chat/AppIcon.icon" --export-image --output-file /tmp/icon.png --platform macOS --rendition Dark --width 512 --height 512 --scale 1 --design-generation 27`
 
 ## Resources
 

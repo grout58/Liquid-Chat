@@ -1,0 +1,21 @@
+{
+  "fill" : {
+    "automatic-gradient" : "extended-srgb:0.29412,0.36078,0.97647,1.00000"
+  },
+  "groups" : [
+    {
+      "layers" : [
+        {
+          "image-name" : "hash.svg",
+          "glass" : true
+        }
+      ]
+    }
+  ],
+  "supported-platforms" : {
+    "circles" : [
+      "watchOS"
+    ],
+    "squares" : "shared"
+  }
+}
