@@ -229,6 +229,13 @@ and the TextKit 2 message view.
   over the asset catalog because both are named `AppIcon`.
 - `Assets.xcassets/AppIcon.appiconset` is kept only as the fallback for
   Xcode 26, which ignores `.icon` files. Xcode 27+ uses the `.icon`.
+- **A rebuilt icon usually still shows the old one.** macOS caches app
+  icons in IconServices by bundle path, so the Dock and Finder keep
+  serving the previous icon even though the bundle is correct — verify
+  the bundle with `assetutil --info .../Assets.car` (look for
+  `AppIcon/Group` and `AppIcon_Assets/*` entries) before suspecting the
+  build. `Scripts/refresh-icon-cache.sh` clears it without sudo
+  (re-register, restart iconservicesagent, restart the Dock).
 - Preview any rendition without opening Icon Composer:
   `"/Applications/Xcode-beta.app/Contents/Applications/Icon Composer.app/Contents/Executables/ictool" "Liquid Chat/AppIcon.icon" --export-image --output-file /tmp/icon.png --platform macOS --rendition Dark --width 512 --height 512 --scale 1 --design-generation 27`
 
